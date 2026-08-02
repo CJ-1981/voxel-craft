@@ -103,3 +103,24 @@ Stage Summary:
 - New files: daynight.ts, mobs.ts, sound.ts, postprocessing.ts
 - Modified files: blocks.ts (15→30 block types), textures.ts (16→32 tiles, 4x8 atlas), world.ts (biomes, caves, ores, save/load, cross/slab meshing), player.ts (health, hunger, oxygen, fly mode, fall damage), MinecraftGame.tsx (integrate all systems, settings UI, mobile controls, death screen, respawn).
 - Performance note: post-processing defaults OFF because it dropped headless-browser FPS from ~10 to ~2. Real browsers with GPU acceleration will handle it fine; users can enable it in Settings.
+
+---
+Task ID: voxelcraft-rendering-particles
+Agent: main (GLM)
+Task: Fix two issues: (1) cube sides still see-through, (2) add demolition particle effect when breaking blocks.
+
+Work Log:
+- Issue 1 (see-through sides): Diagnosed via geometric normal calculation. All 6 FACE_CORNERS arrays had reversed winding — their right-hand-rule normals pointed INWARD (opposite to declared outward normals). With the opaque material using default THREE.FrontSide, every outward-facing triangle was classified as a back face and culled by the GPU, making opaque blocks appear see-through. Fixed by reversing the triangle index winding from (0,1,2)(0,2,3) to (0,2,1)(0,3,2) in buildChunkGeometry. This single change fixes regular quads, pushCrossFace quads, and pushSlabFace quads (all share the same index buffer). UV-to-corner mapping untouched so textures are not mirrored. Also disabled mipmaps on the atlas texture (NearestFilter for both mag/min) to eliminate cross-tile color bleeding at distance.
+- Verified the fix via Agent Browser: cube sides are now fully solid and opaque. The earlier "see-through" report was because the player spawned in an ocean biome and was underwater (water IS translucent by design). On solid ground, all opaque blocks render correctly.
+- Issue 2 (demolition particles): Created new src/lib/game/particles.ts with BreakParticles class. Spawns 14-20 small textured cube particles (0.3 block size) when a block is broken. Each particle has: random outward+upward velocity, random angular velocity (tumbling), gravity physics, 2-3.5s lifetime, shrink-to-zero in last 30% of life.
+- Initial particle rendering failed: particles were in the scene graph (confirmed via renderer.info: 13 extra draw calls, 120 extra triangles) but NOT visible in screenshots. Diagnosed via multiple VLM checks against sky/ground/tree backgrounds.
+- Root cause: MeshLambertMaterial requires scene lights, and small particles at 0.2-0.3 size received inadequate lighting (especially in shadowed areas / at night / underwater), rendering them effectively black/invisible. Switched to MeshBasicMaterial (always fully lit, ignores scene lighting) — particles now render correctly.
+- Additional fixes: clamped dt in particle update to 0.1s max (prevents particles from dying instantly when tab regains focus after a long background period), increased particle size from 0.15 to 0.3 for visibility, set frustumCulled=false on particle meshes (safety net for cloned geometry bounding spheres), recomputed geometry bounding sphere/bbox after UV rewrite.
+- Wired particle spawning into all 4 block-break handlers: desktop left-click (normal break), desktop TNT explosion (8 particles per destroyed block in 3x3x3), mobile break button, mobile TNT. Also added particles.update(dt) call in both branches of the game loop (playing and paused) so particles finish their animation even if the game pauses.
+- Verified: 25 dirt particles spawned above camera looking at sky are clearly visible as brown cubes against the blue sky.
+
+Stage Summary:
+- Both issues fixed and verified via Agent Browser.
+- Lint passes cleanly. No console errors.
+- New file: src/lib/game/particles.ts (BreakParticles class with spawn/update/dispose).
+- Modified files: src/lib/game/world.ts (reversed index winding, disabled mipmaps), src/components/game/MinecraftGame.tsx (integrate BreakParticles, wire to all break handlers, update in game loop).

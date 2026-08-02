@@ -10,6 +10,7 @@ import { DayNightCycle } from '@/lib/game/daynight'
 import { MobManager } from '@/lib/game/mobs'
 import { SoundSystem } from '@/lib/game/sound'
 import { PostProcessing } from '@/lib/game/postprocessing'
+import { BreakParticles } from '@/lib/game/particles'
 
 interface GameHandle {
   world: World
@@ -23,6 +24,7 @@ interface GameHandle {
   mobs: MobManager
   sound: SoundSystem
   post: PostProcessing
+  particles: BreakParticles
   dispose: () => void
 }
 
@@ -181,6 +183,7 @@ export default function MinecraftGame() {
     const post = new PostProcessing(renderer, scene, camera)
     post.setEnabled(s.postProcessing)
     post.setBloomStrength(s.bloom ? 0.5 : 0)
+    const particles = new BreakParticles(scene, atlas)
 
     const input: InputState = {
       forward: false, back: false, left: false, right: false,
@@ -189,7 +192,7 @@ export default function MinecraftGame() {
 
     gameRef.current = {
       world, player, scene, camera, renderer, input, selectionMesh,
-      dayNight, mobs, sound, post,
+      dayNight, mobs, sound, post, particles,
       dispose: () => {
         renderer.dispose()
         atlas.dispose()
@@ -200,6 +203,7 @@ export default function MinecraftGame() {
         mobs.dispose()
         sound.dispose()
         post.dispose()
+        particles.dispose()
         scene.traverse(obj => {
           if (obj instanceof THREE.Mesh) obj.geometry?.dispose?.()
         })
@@ -229,6 +233,7 @@ export default function MinecraftGame() {
         player.update(world, input, dt)
         mobs.update(world, player, dayNight.isNight(), dt)
         dayNight.update(dt, player.position)
+        particles.update(dt)
 
         // Footstep audio: when walking on ground, play a sound every ~0.35m.
         const horizSpeed = Math.sqrt(player.velocity.x * player.velocity.x + player.velocity.z * player.velocity.z)
@@ -262,6 +267,8 @@ export default function MinecraftGame() {
       } else {
         // Still update day/night for ambient feel on menus.
         dayNight.update(dt, player.position)
+        // Keep updating particles so they finish their animation even if paused.
+        particles.update(dt)
       }
 
       // Sync camera.
@@ -385,7 +392,8 @@ export default function MinecraftGame() {
             for (let dy = -1; dy <= 1; dy++) {
               for (let dz = -1; dz <= 1; dz++) {
                 const tb = g.world.getBlock(hit.x + dx, hit.y + dy, hit.z + dz)
-                if (tb !== 'bedrock') {
+                if (tb !== 'bedrock' && tb !== 'air') {
+                  particles.spawn(tb, hit.x + dx, hit.y + dy, hit.z + dz, 8)
                   g.world.setBlockAndUpdate(g.scene, hit.x + dx, hit.y + dy, hit.z + dz, 'air')
                 }
               }
@@ -409,6 +417,7 @@ export default function MinecraftGame() {
           return
         }
         g.world.setBlockAndUpdate(g.scene, hit.x, hit.y, hit.z, 'air')
+        particles.spawn(b, hit.x, hit.y, hit.z, 14)
         sound.blockBreak()
         // Vibrate on mobile.
         if (navigator.vibrate) navigator.vibrate(15)
@@ -594,12 +603,16 @@ export default function MinecraftGame() {
     if (b === 'tnt') {
       for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
         const tb = g.world.getBlock(hit.x + dx, hit.y + dy, hit.z + dz)
-        if (tb !== 'bedrock') g.world.setBlockAndUpdate(g.scene, hit.x + dx, hit.y + dy, hit.z + dz, 'air')
+        if (tb !== 'bedrock' && tb !== 'air') {
+          g.particles.spawn(tb, hit.x + dx, hit.y + dy, hit.z + dz, 8)
+          g.world.setBlockAndUpdate(g.scene, hit.x + dx, hit.y + dy, hit.z + dz, 'air')
+        }
       }
       g.sound.explosion()
       return
     }
     g.world.setBlockAndUpdate(g.scene, hit.x, hit.y, hit.z, 'air')
+    g.particles.spawn(b, hit.x, hit.y, hit.z, 14)
     g.sound.blockBreak()
     if (navigator.vibrate) navigator.vibrate(15)
   }, [])

@@ -1,0 +1,687 @@
+     1→     1→// World data, terrain generation, chunk meshing, and persistence for the voxel game.
+     2→     2→
+     3→     3→import * as THREE from 'three'
+     4→     4→import { createNoise2D, createNoise3D } from 'simplex-noise'
+     5→     5→import { BLOCKS, BlockType, isTransparent } from './blocks'
+     6→     6→import { tileUV, ATLAS_COLS, ATLAS_ROWS, TILE_SIZE } from './textures'
+     7→     7→
+     8→     8→// Block integer IDs (stored in the world array for performance).
+     9→     9→// IMPORTANT: append new block types at the end so saved worlds stay compatible.
+    10→    10→const BLOCK_IDS: BlockType[] = [
+    11→    11→  'air', 'grass', 'dirt', 'stone', 'wood', 'leaves', 'sand', 'water',
+    12→    12→  'planks', 'cobblestone', 'bedrock', 'glass', 'brick', 'gold', 'diamond',
+    13→    13→  'snow', 'ice', 'cactus', 'flower_red', 'flower_yellow', 'coal_ore', 'iron_ore',
+    14→    14→  'stairs', 'slab', 'fence', 'door', 'ladder', 'tnt', 'glowstone',
+    15→    15→]
+    16→    16→const ID_TO_TYPE = new Map<number, BlockType>()
+    17→    17→const TYPE_TO_ID = new Map<BlockType, number>()
+    18→    18→BLOCK_IDS.forEach((t, i) => {
+    19→    19→  ID_TO_TYPE.set(i, t)
+    20→    20→  TYPE_TO_ID.set(t, i)
+    21→    21→})
+    22→    22→
+    23→    23→export const WORLD_SIZE_X = 64
+    24→    24→export const WORLD_SIZE_Y = 48
+    25→    25→export const WORLD_SIZE_Z = 64
+    26→    26→export const WATER_LEVEL = 12
+    27→    27→
+    28→    28→const CHUNK_SIZE = 16
+    29→    29→const CHUNKS_X = WORLD_SIZE_X / CHUNK_SIZE
+    30→    30→const CHUNKS_Z = WORLD_SIZE_Z / CHUNK_SIZE
+    31→    31→
+    32→    32→function idx(x: number, y: number, z: number): number {
+    33→    33→  return x + z * WORLD_SIZE_X + y * WORLD_SIZE_X * WORLD_SIZE_Z
+    34→    34→}
+    35→    35→
+    36→    36→// Biome definitions for terrain variety.
+    37→    37→export type BiomeType = 'plains' | 'forest' | 'desert' | 'snow' | 'ocean'
+    38→    38→
+    39→    39→interface BiomeDef {
+    40→    40→  type: BiomeType
+    41→    41→  surface: BlockType // Top block (above water)
+    42→    42→  subsurface: BlockType // 3 blocks under surface
+    43→    43→  treeChance: number // 0..1 probability per column
+    44→    44→  cactusChance: number
+    45→    45→  flowerChance: number
+    46→    46→  waterBlock?: BlockType // For frozen biomes
+    47→    47→  hasSnow?: boolean
+    48→    48→}
+    49→    49→
+    50→    50→const BIOMES: Record<BiomeType, BiomeDef> = {
+    51→    51→  plains: { type: 'plains', surface: 'grass', subsurface: 'dirt', treeChance: 0.03, cactusChance: 0, flowerChance: 0.06 },
+    52→    52→  forest: { type: 'forest', surface: 'grass', subsurface: 'dirt', treeChance: 0.12, cactusChance: 0, flowerChance: 0.04 },
+    53→    53→  desert: { type: 'desert', surface: 'sand', subsurface: 'sand', treeChance: 0, cactusChance: 0.05, flowerChance: 0 },
+    54→    54→  snow:   { type: 'snow',   surface: 'snow', subsurface: 'dirt', treeChance: 0.04, cactusChance: 0, flowerChance: 0, hasSnow: true },
+    55→    55→  ocean:  { type: 'ocean',  surface: 'sand', subsurface: 'sand', treeChance: 0, cactusChance: 0, flowerChance: 0 },
+    56→    56→}
+    57→    57→
+    58→    58→const SAVE_KEY = 'voxelcraft_world_v1'
+    59→    59→const SAVE_META_KEY = 'voxelcraft_meta_v1'
+    60→    60→
+    61→    61→export interface WorldSaveMeta {
+    62→    62→  seed: number
+    63→    63→  savedAt: number
+    64→    64→  playerX: number
+    65→    65→  playerY: number
+    66→    66→  playerZ: number
+    67→    67→  playerYaw: number
+    68→    68→  playerPitch: number
+    69→    69→}
+    70→    70→
+    71→    71→export class World {
+    72→    72→  data: Uint8Array
+    73→    73→  /** Biome per column (index = x + z * WORLD_SIZE_X). */
+    74→    74→  biomes: Uint8Array
+    75→    75→  chunkOpaqueMeshes: (THREE.Mesh | null)[]
+    76→    76→  chunkCutoutMeshes: (THREE.Mesh | null)[]
+    77→    77→  chunkTranslucentMeshes: (THREE.Mesh | null)[]
+    78→    78→  private opaqueMaterial: THREE.Material
+    79→    79→  private cutoutMaterial: THREE.Material
+    80→    80→  private translucentMaterial: THREE.Material
+    81→    81→  readonly seed: number
+    82→    82→
+    83→    83→  constructor(scene: THREE.Scene, atlasTexture: THREE.Texture, seed?: number) {
+    84→    84→    this.data = new Uint8Array(WORLD_SIZE_X * WORLD_SIZE_Y * WORLD_SIZE_Z)
+    85→    85→    this.biomes = new Uint8Array(WORLD_SIZE_X * WORLD_SIZE_Z)
+    86→    86→    this.chunkOpaqueMeshes = new Array(CHUNKS_X * CHUNKS_Z).fill(null)
+    87→    87→    this.chunkCutoutMeshes = new Array(CHUNKS_X * CHUNKS_Z).fill(null)
+    88→    88→    this.chunkTranslucentMeshes = new Array(CHUNKS_X * CHUNKS_Z).fill(null)
+    89→    89→
+    90→    90→    this.opaqueMaterial = new THREE.MeshLambertMaterial({
+    91→    91→      map: atlasTexture,
+    92→    92→      alphaTest: 0.5,
+    93→    93→    })
+    94→    94→    this.cutoutMaterial = new THREE.MeshLambertMaterial({
+    95→    95→      map: atlasTexture,
+    96→    96→      transparent: false,
+    97→    97→      alphaTest: 0.5,
+    98→    98→      side: THREE.DoubleSide,
+    99→    99→      depthWrite: true,
+   100→   100→    })
+   101→   101→    this.translucentMaterial = new THREE.MeshLambertMaterial({
+   102→   102→      map: atlasTexture,
+   103→   103→      transparent: true,
+   104→   104→      opacity: 0.78,
+   105→   105→      depthWrite: true,
+   106→   106→      side: THREE.DoubleSide,
+   107→   107→      alphaTest: 0.05,
+   108→   108→    })
+   109→   109→
+   110→   110→    this.seed = seed ?? Math.floor(Math.random() * 0x7fffffff)
+   111→   111→    this.generate()
+   112→   112→
+   113→   113→    for (let cz = 0; cz < CHUNKS_Z; cz++) {
+   114→   114→      for (let cx = 0; cx < CHUNKS_X; cx++) {
+   115→   115→        this.rebuildChunk(scene, cx, cz)
+   116→   116→      }
+   117→   117→    }
+   118→   118→  }
+   119→   119→
+   120→   120→  // ----- Block access -----
+   121→   121→
+   122→   122→  inBounds(x: number, y: number, z: number): boolean {
+   123→   123→    return x >= 0 && x < WORLD_SIZE_X && y >= 0 && y < WORLD_SIZE_Y && z >= 0 && z < WORLD_SIZE_Z
+   124→   124→  }
+   125→   125→
+   126→   126→  getBlock(x: number, y: number, z: number): BlockType {
+   127→   127→    if (!this.inBounds(x, y, z)) return 'air'
+   128→   128→    const id = this.data[idx(x, y, z)]
+   129→   129→    return ID_TO_TYPE.get(id) ?? 'air'
+   130→   130→  }
+   131→   131→
+   132→   132→  private getBlockForCulling(x: number, y: number, z: number): BlockType {
+   133→   133→    if (y < 0) return 'bedrock'
+   134→   134→    if (y >= WORLD_SIZE_Y) return 'air'
+   135→   135→    if (x < 0 || x >= WORLD_SIZE_X || z < 0 || z >= WORLD_SIZE_Z) return 'air'
+   136→   136→    const id = this.data[idx(x, y, z)]
+   137→   137→    return ID_TO_TYPE.get(id) ?? 'air'
+   138→   138→  }
+   139→   139→
+   140→   140→  setBlock(x: number, y: number, z: number, type: BlockType): boolean {
+   141→   141→    if (!this.inBounds(x, y, z)) return false
+   142→   142→    const id = TYPE_TO_ID.get(type) ?? 0
+   143→   143→    this.data[idx(x, y, z)] = id
+   144→   144→    return true
+   145→   145→  }
+   146→   146→
+   147→   147→  setBlockAndUpdate(scene: THREE.Scene, x: number, y: number, z: number, type: BlockType): void {
+   148→   148→    if (!this.setBlock(x, y, z, type)) return
+   149→   149→    const cx = Math.floor(x / CHUNK_SIZE)
+   150→   150→    const cz = Math.floor(z / CHUNK_SIZE)
+   151→   151→    this.rebuildChunk(scene, cx, cz)
+   152→   152→    const lx = x - cx * CHUNK_SIZE
+   153→   153→    const lz = z - cz * CHUNK_SIZE
+   154→   154→    if (lx === 0 && cx > 0) this.rebuildChunk(scene, cx - 1, cz)
+   155→   155→    if (lx === CHUNK_SIZE - 1 && cx < CHUNKS_X - 1) this.rebuildChunk(scene, cx + 1, cz)
+   156→   156→    if (lz === 0 && cz > 0) this.rebuildChunk(scene, cx, cz - 1)
+   157→   157→    if (lz === CHUNK_SIZE - 1 && cz < CHUNKS_Z - 1) this.rebuildChunk(scene, cx, cz + 1)
+   158→   158→  }
+   159→   159→
+   160→   160→  getBiome(x: number, z: number): BiomeType {
+   161→   161→    if (x < 0 || x >= WORLD_SIZE_X || z < 0 || z >= WORLD_SIZE_Z) return 'plains'
+   162→   162→    const id = this.biomes[x + z * WORLD_SIZE_X]
+   163→   163→    return (['plains', 'forest', 'desert', 'snow', 'ocean'] as BiomeType[])[id] ?? 'plains'
+   164→   164→  }
+   165→   165→
+   166→   166→  // ----- Save / Load -----
+   167→   167→
+   168→   168→  /** Serialize the world to localStorage. Returns true on success. */
+   169→   169→  save(player?: { x: number; y: number; z: number; yaw: number; pitch: number }): boolean {
+   170→   170→    try {
+   171→   171→      // Use base64 encoding of the raw byte array for compactness.
+   172→   172→      // The data array can be up to ~200KB which fits in localStorage.
+   173→   173→      let bin = ''
+   174→   174→      const chunk = 0x8000
+   175→   175→      for (let i = 0; i < this.data.length; i += chunk) {
+   176→   176→        bin += String.fromCharCode.apply(null, Array.from(this.data.subarray(i, i + chunk)) as unknown as number[])
+   177→   177→      }
+   178→   178→      const b64 = btoa(bin)
+   179→   179→      localStorage.setItem(SAVE_KEY, b64)
+   180→   180→      const meta: WorldSaveMeta = {
+   181→   181→        seed: this.seed,
+   182→   182→        savedAt: Date.now(),
+   183→   183→        playerX: player?.x ?? 0,
+   184→   184→        playerY: player?.y ?? 0,
+   185→   185→        playerZ: player?.z ?? 0,
+   186→   186→        playerYaw: player?.yaw ?? 0,
+   187→   187→        playerPitch: player?.pitch ?? 0,
+   188→   188→      }
+   189→   189→      localStorage.setItem(SAVE_META_KEY, JSON.stringify(meta))
+   190→   190→      return true
+   191→   191→    } catch (e) {
+   192→   192→      console.warn('World save failed:', e)
+   193→   193→      return false
+   194→   194→    }
+   195→   195→  }
+   196→   196→
+   197→   197→  static hasSave(): boolean {
+   198→   198→    try {
+   199→   199→      return !!localStorage.getItem(SAVE_KEY) && !!localStorage.getItem(SAVE_META_KEY)
+   200→   200→    } catch {
+   201→   201→      return false
+   202→   202→    }
+   203→   203→  }
+   204→   204→
+   205→   205→  static loadMeta(): WorldSaveMeta | null {
+   206→   206→    try {
+   207→   207→      const raw = localStorage.getItem(SAVE_META_KEY)
+   208→   208→      return raw ? JSON.parse(raw) as WorldSaveMeta : null
+   209→   209→    } catch {
+   210→   210→      return null
+   211→   211→    }
+   212→   212→  }
+   213→   213→
+   214→   214→  /** Loads block data from localStorage into this world. Rebuilds all chunks. */
+   215→   215→  loadFromSave(scene: THREE.Scene): { meta: WorldSaveMeta } | null {
+   216→   216→    try {
+   217→   217→      const b64 = localStorage.getItem(SAVE_KEY)
+   218→   218→      const meta = World.loadMeta()
+   219→   219→      if (!b64 || !meta) return null
+   220→   220→      const bin = atob(b64)
+   221→   221→      const bytes = new Uint8Array(bin.length)
+   222→   222→      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+   223→   223→      if (bytes.length !== this.data.length) {
+   224→   224→        console.warn('Save size mismatch — ignoring save.')
+   225→   225→        return null
+   226→   226→      }
+   227→   227→      this.data.set(bytes)
+   228→   228→      // Biomes can't be reliably reconstructed from saved data alone, so
+   229→   229→      // recompute them deterministically from the same seed.
+   230→   230→      this.computeBiomes()
+   231→   231→      for (let cz = 0; cz < CHUNKS_Z; cz++) {
+   232→   232→        for (let cx = 0; cx < CHUNKS_X; cx++) {
+   233→   233→          this.rebuildChunk(scene, cx, cz)
+   234→   234→        }
+   235→   235→      }
+   236→   236→      return { meta }
+   237→   237→    } catch (e) {
+   238→   238→      console.warn('World load failed:', e)
+   239→   239→      return null
+   240→   240→    }
+   241→   241→  }
+   242→   242→
+   243→   243→  static clearSave(): void {
+   244→   244→    try {
+   245→   245→      localStorage.removeItem(SAVE_KEY)
+   246→   246→      localStorage.removeItem(SAVE_META_KEY)
+   247→   247→    } catch { /* ignore */ }
+   248→   248→  }
+   249→   249→
+   250→   250→  // ----- Terrain generation -----
+   251→   251→
+   252→   252→  /** Deterministic PRNG (mulberry32) — same seed always produces same world. */
+   253→   253→  private makeRng(seed: number): () => number {
+   254→   254→    let s = seed >>> 0
+   255→   255→    return () => {
+   256→   256→      s = (s + 0x6D2B79F5) >>> 0
+   257→   257→      let t = s
+   258→   258→      t = Math.imul(t ^ (t >>> 15), t | 1)
+   259→   259→      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+   260→   260→      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+   261→   261→    }
+   262→   262→  }
+   263→   263→
+   264→   264→  private computeBiomes(): void {
+   265→   265→    const rng = this.makeRng(this.seed)
+   266→   266→    const biomeNoise = createNoise2D(this.makeRng(this.seed + 1))
+   267→   267→    const moistureNoise = createNoise2D(this.makeRng(this.seed + 2))
+   268→   268→    const tempNoise = createNoise2D(this.makeRng(this.seed + 3))
+   269→   269→    void rng
+   270→   270→
+   271→   271→    const biomeList: BiomeType[] = ['plains', 'forest', 'desert', 'snow', 'ocean']
+   272→   272→    for (let x = 0; x < WORLD_SIZE_X; x++) {
+   273→   273→      for (let z = 0; z < WORLD_SIZE_Z; z++) {
+   274→   274→        // Use 4-octave noise to create biome regions.
+   275→   275→        const b = biomeNoise(x * 0.025, z * 0.025) // -1..1
+   276→   276→        const m = moistureNoise(x * 0.04, z * 0.04) // -1..1
+   277→   277→        const t = tempNoise(x * 0.03, z * 0.03) // -1..1
+   278→   278→
+   279→   279→        let biome: BiomeType
+   280→   280→        if (b < -0.4) {
+   281→   281→          biome = 'ocean'
+   282→   282→        } else if (t < -0.3) {
+   283→   283→          biome = 'snow'
+   284→   284→        } else if (t > 0.4 && m < 0) {
+   285→   285→          biome = 'desert'
+   286→   286→        } else if (m > 0.2 && b > 0) {
+   287→   287→          biome = 'forest'
+   288→   288→        } else {
+   289→   289→          biome = 'plains'
+   290→   290→        }
+   291→   291→        this.biomes[x + z * WORLD_SIZE_X] = biomeList.indexOf(biome)
+   292→   292→      }
+   293→   293→    }
+   294→   294→  }
+   295→   295→
+   296→   296→  private generate(): void {
+   297→   297→    this.computeBiomes()
+   298→   298→
+   299→   299→    // Use seed-based PRNGs so terrain is deterministic per seed.
+   300→   300→    const heightNoise = createNoise2D(this.makeRng(this.seed + 10))
+   301→   301→    const detailNoise = createNoise2D(this.makeRng(this.seed + 11))
+   302→   302→    const caveNoise = createNoise3D(this.makeRng(this.seed + 12))
+   303→   303→    const caveNoise2 = createNoise3D(this.makeRng(this.seed + 13))
+   304→   304→    const oreNoise = createNoise3D(this.makeRng(this.seed + 14))
+   305→   305→    const scatterRng = this.makeRng(this.seed + 20)
+   306→   306→
+   307→   307→    const heightAt = (x: number, z: number, biome: BiomeDef): number => {
+   308→   308→      const base = biome.type === 'ocean' ? 7 : biome.type === 'desert' ? 14 : 14
+   309→   309→      const amp = biome.type === 'plains' ? 4 : biome.type === 'forest' ? 6 : 8
+   310→   310→      const scale = 0.04
+   311→   311→      const h1 = heightNoise(x * scale, z * scale) * amp
+   312→   312→      const h2 = detailNoise(x * scale * 2.1, z * scale * 2.1) * 2.5
+   313→   313→      let h = Math.max(1, Math.floor(base + h1 + h2))
+   314→   314→      if (biome.type === 'ocean') h = Math.min(h, WATER_LEVEL - 1)
+   315→   315→      return h
+   316→   316→    }
+   317→   317→
+   318→   318→    // First pass: terrain columns.
+   319→   319→    for (let x = 0; x < WORLD_SIZE_X; x++) {
+   320→   320→      for (let z = 0; z < WORLD_SIZE_Z; z++) {
+   321→   321→        const biome = BIOMES[this.getBiome(x, z)]
+   322→   322→        const h = heightAt(x, z, biome)
+   323→   323→        for (let y = 0; y <= h; y++) {
+   324→   324→          let type: BlockType = 'stone'
+   325→   325→          if (y === 0) {
+   326→   326→            type = 'bedrock'
+   327→   327→          } else if (y === h) {
+   328→   328→            // Surface block
+   329→   329→            if (h < WATER_LEVEL) {
+   330→   330→              type = biome.surface === 'grass' ? 'dirt' : biome.surface // underwater: dirt for grass biomes
+   331→   331→            } else {
+   332→   332→              type = biome.surface
+   333→   333→            }
+   334→   334→            // Snow biome: snow on top, dirt below
+   335→   335→            if (biome.hasSnow && h >= WATER_LEVEL) type = 'snow'
+   336→   336→          } else if (y >= h - 3) {
+   337→   337→            type = biome.subsurface
+   338→   338→            if (biome.hasSnow && y >= h - 1) type = 'dirt' // dirt under snow
+   339→   339→          } else {
+   340→   340→            type = 'stone'
+   341→   341→            // Ore veins via 3D noise thresholding.
+   342→   342→            const oreN = oreNoise(x * 0.1, y * 0.15, z * 0.1)
+   343→   343→            if (y < 4 && oreN > 0.78) type = 'diamond'
+   344→   344→            else if (y < 10 && oreN > 0.7) type = 'gold'
+   345→   345→            else if (y < 20 && oreNoise(x * 0.15, y * 0.2, z * 0.15) > 0.65) type = 'iron_ore'
+   346→   346→            else if (oreNoise(x * 0.2, y * 0.25, z * 0.2) > 0.6) type = 'coal_ore'
+   347→   347→          }
+   348→   348→          // Carve caves: two overlapping 3D noise fields. Caves only below surface
+   349→   349→          // and above bedrock, and never under oceans (so we don't flood the world).
+   350→   350→          if (y > 1 && y < h - 1 && biome.type !== 'ocean') {
+   351→   351→            const c1 = caveNoise(x * 0.08, y * 0.1, z * 0.08)
+   352→   352→            const c2 = caveNoise2(x * 0.05, y * 0.06, z * 0.05)
+   353→   353→            // Tunnels: where both noises are near zero (worm-like).
+   354→   354→            if (Math.abs(c1) < 0.07 && Math.abs(c2) < 0.15) {
+   355→   355→              type = 'air'
+   356→   356→            }
+   357→   357→            // Larger caverns: where one noise exceeds a high threshold.
+   358→   358→            if (c1 > 0.85 && y < h - 4) {
+   359→   359→              type = 'air'
+   360→   360→            }
+   361→   361→          }
+   362→   362→          this.setBlock(x, y, z, type)
+   363→   363→        }
+   364→   364→        // Water fill
+   365→   365→        if (h < WATER_LEVEL) {
+   366→   366→          for (let y = h + 1; y <= WATER_LEVEL; y++) {
+   367→   367→            this.setBlock(x, y, z, biome.hasSnow ? 'ice' : 'water')
+   368→   368→          }
+   369→   369→        }
+   370→   370→      }
+   371→   371→    }
+   372→   372→
+   373→   373→    // Second pass: scatter trees, cacti, flowers.
+   374→   374→    for (let x = 3; x < WORLD_SIZE_X - 3; x++) {
+   375→   375→      for (let z = 3; z < WORLD_SIZE_Z - 3; z++) {
+   376→   376→        const biome = BIOMES[this.getBiome(x, z)]
+   377→   377→        const r = scatterRng()
+   378→   378→        // Find surface
+   379→   379→        let surfY = -1
+   380→   380→        for (let y = WORLD_SIZE_Y - 1; y >= 0; y--) {
+   381→   381→          const b = this.getBlock(x, y, z)
+   382→   382→          if (b === 'air' || b === 'water' || b === 'ice') continue
+   383→   383→          surfY = y
+   384→   384→          break
+   385→   385→        }
+   386→   386→        if (surfY < 0) continue
+   387→   387→        if (surfY < WATER_LEVEL) continue // Don't plant in water
+   388→   388→        const surfBlock = this.getBlock(x, surfY, z)
+   389→   389→        if (r < biome.treeChance && (surfBlock === 'grass' || surfBlock === 'snow')) {
+   390→   390→          this.plantTree(x, surfY + 1, z, biome.type === 'snow')
+   391→   391→        } else if (r < biome.treeChance + biome.cactusChance && surfBlock === 'sand') {
+   392→   392→          // Cactus: 1-3 blocks tall
+   393→   393→          const ch = 1 + Math.floor(scatterRng() * 3)
+   394→   394→          for (let i = 1; i <= ch; i++) this.setBlock(x, surfY + i, z, 'cactus')
+   395→   395→        } else if (r < biome.treeChance + biome.cactusChance + biome.flowerChance && surfBlock === 'grass') {
+   396→   396→          this.setBlock(x, surfY + 1, z, scatterRng() < 0.5 ? 'flower_red' : 'flower_yellow')
+   397→   397→        }
+   398→   398→      }
+   399→   399→    }
+   400→   400→  }
+   401→   401→
+   402→   402→  private plantTree(x: number, y: number, z: number, snowBiome: boolean): void {
+   403→   403→    const trunkH = 4 + Math.floor(Math.random() * 2)
+   404→   404→    for (let i = 0; i < trunkH; i++) {
+   405→   405→      this.setBlock(x, y + i, z, 'wood')
+   406→   406→    }
+   407→   407→    const topY = y + trunkH
+   408→   408→    for (let dy = -1; dy <= 1; dy++) {
+   409→   409→      const ly = topY + dy
+   410→   410→      const radius = dy === 1 ? 1 : 2
+   411→   411→      for (let dx = -radius; dx <= radius; dx++) {
+   412→   412→        for (let dz = -radius; dz <= radius; dz++) {
+   413→   413→          if (dx === 0 && dz === 0 && dy < 1) continue
+   414→   414→          if (Math.abs(dx) === radius && Math.abs(dz) === radius && Math.random() < 0.6) continue
+   415→   415→          const lx = x + dx
+   416→   416→          const lz = z + dz
+   417→   417→          if (this.getBlock(lx, ly, lz) === 'air') {
+   418→   418→            this.setBlock(lx, ly, lz, snowBiome ? 'snow' : 'leaves')
+   419→   419→          }
+   420→   420→        }
+   421→   421→      }
+   422→   422→    }
+   423→   423→    this.setBlock(x, topY + 1, z, snowBiome ? 'snow' : 'leaves')
+   424→   424→  }
+   425→   425→
+   426→   426→  // ----- Chunk meshing (unchanged from previous version) -----
+   427→   427→
+   428→   428→  private rebuildChunk(scene: THREE.Scene, cx: number, cz: number): void {
+   429→   429→    const i = cx + cz * CHUNKS_X
+   430→   430→    const oldOpaque = this.chunkOpaqueMeshes[i]
+   431→   431→    const oldCut = this.chunkCutoutMeshes[i]
+   432→   432→    const oldTrans = this.chunkTranslucentMeshes[i]
+   433→   433→    if (oldOpaque) { scene.remove(oldOpaque); oldOpaque.geometry.dispose(); this.chunkOpaqueMeshes[i] = null }
+   434→   434→    if (oldCut) { scene.remove(oldCut); oldCut.geometry.dispose(); this.chunkCutoutMeshes[i] = null }
+   435→   435→    if (oldTrans) { scene.remove(oldTrans); oldTrans.geometry.dispose(); this.chunkTranslucentMeshes[i] = null }
+   436→   436→
+   437→   437→    const opaque = this.buildChunkGeometry(cx, cz, 'opaque')
+   438→   438→    const cutout = this.buildChunkGeometry(cx, cz, 'cutout')
+   439→   439→    const translucent = this.buildChunkGeometry(cx, cz, 'translucent')
+   440→   440→
+   441→   441→    if (opaque) {
+   442→   442→      const mesh = new THREE.Mesh(opaque, this.opaqueMaterial)
+   443→   443→      mesh.name = `chunk_opaque_${cx}_${cz}`
+   444→   444→      this.chunkOpaqueMeshes[i] = mesh
+   445→   445→      scene.add(mesh)
+   446→   446→    }
+   447→   447→    if (cutout) {
+   448→   448→      const mesh = new THREE.Mesh(cutout, this.cutoutMaterial)
+   449→   449→      mesh.name = `chunk_cutout_${cx}_${cz}`
+   450→   450→      mesh.renderOrder = 1
+   451→   451→      this.chunkCutoutMeshes[i] = mesh
+   452→   452→      scene.add(mesh)
+   453→   453→    }
+   454→   454→    if (translucent) {
+   455→   455→      const mesh = new THREE.Mesh(translucent, this.translucentMaterial)
+   456→   456→      mesh.name = `chunk_trans_${cx}_${cz}`
+   457→   457→      mesh.renderOrder = 2
+   458→   458→      this.chunkTranslucentMeshes[i] = mesh
+   459→   459→      scene.add(mesh)
+   460→   460→    }
+   461→   461→  }
+   462→   462→
+   463→   463→  private buildChunkGeometry(cx: number, cz: number, pass: 'opaque' | 'cutout' | 'translucent'): THREE.BufferGeometry | null {
+   464→   464→    const positions: number[] = []
+   465→   465→    const normals: number[] = []
+   466→   466→    const uvs: number[] = []
+   467→   467→    const colors: number[] = []
+   468→   468→
+   469→   469→    const x0 = cx * CHUNK_SIZE
+   470→   470→    const z0 = cz * CHUNK_SIZE
+   471→   471→
+   472→   472→    const FACE_CORNERS: Record<number, [number, number, number][]> = {
+   473→   473→      0: [[0, 1, 0], [1, 1, 0], [1, 1, 1], [0, 1, 1]],
+   474→   474→      2: [[0, 0, 1], [1, 0, 1], [1, 0, 0], [0, 0, 0]],
+   475→   475→      1: [[1, 0, 0], [1, 0, 1], [1, 1, 1], [1, 1, 0]],
+   476→   476→      3: [[0, 0, 1], [0, 0, 0], [0, 1, 0], [0, 1, 1]],
+   477→   477→      4: [[1, 0, 1], [0, 0, 1], [0, 1, 1], [1, 1, 1]],
+   478→   478→      5: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]],
+   479→   479→    }
+   480→   480→    const FACE_DEFS = [
+   481→   481→      { dir: [0, 1, 0] as const, n: [0, 1, 0] as const, faceKind: 0, corners: FACE_CORNERS[0] },
+   482→   482→      { dir: [0, -1, 0] as const, n: [0, -1, 0] as const, faceKind: 2, corners: FACE_CORNERS[2] },
+   483→   483→      { dir: [1, 0, 0] as const, n: [1, 0, 0] as const, faceKind: 1, corners: FACE_CORNERS[1] },
+   484→   484→      { dir: [-1, 0, 0] as const, n: [-1, 0, 0] as const, faceKind: 1, corners: FACE_CORNERS[3] },
+   485→   485→      { dir: [0, 0, 1] as const, n: [0, 0, 1] as const, faceKind: 1, corners: FACE_CORNERS[4] },
+   486→   486→      { dir: [0, 0, -1] as const, n: [0, 0, -1] as const, faceKind: 1, corners: FACE_CORNERS[5] },
+   487→   487→    ]
+   488→   488→
+   489→   489→    let hasGeometry = false
+   490→   490→
+   491→   491→    for (let ly = 0; ly < WORLD_SIZE_Y; ly++) {
+   492→   492→      for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+   493→   493→        for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+   494→   494→          const wx = x0 + lx
+   495→   495→          const wz = z0 + lz
+   496→   496→          const block = this.getBlock(wx, ly, wz)
+   497→   497→          if (block === 'air') continue
+   498→   498→          const def = BLOCKS[block]
+   499→   499→          const isTranslucent = !!def.translucent
+   500→   500→          const isCutout = !!def.transparent && !isTranslucent
+   501→   501→          if (pass === 'opaque' && def.transparent) continue
+   502→   502→          if (pass === 'cutout' && !isCutout) continue
+   503→   503→          if (pass === 'translucent' && !isTranslucent) continue
+   504→   504→
+   505→   505→          // Cross-shaped blocks (flowers, cactus, ladder) only render on +X/-X/+Z/-Z faces.
+   506→   506→          const isCross = !!def.cross
+   507→   507→          // Slab: only renders top face at y+0.5 (handled separately below).
+   508→   508→          const isSlab = !!def.slab
+   509→   509→
+   510→   510→          for (const face of FACE_DEFS) {
+   511→   511→            // Cross blocks: skip top and bottom faces.
+   512→   512→            if (isCross && face.faceKind !== 1) continue
+   513→   513→            const nb = this.getBlockForCulling(wx + face.dir[0], ly + face.dir[1], wz + face.dir[2])
+   514→   514→            if (nb === block) continue
+   515→   515→            if (nb !== 'air') {
+   516→   516→              const nbDef = BLOCKS[nb]
+   517→   517→              const nbTranslucent = !!nbDef.translucent
+   518→   518→              const nbCutout = !!nbDef.transparent && !nbTranslucent
+   519→   519→              const nbOpaque = !nbDef.transparent
+   520→   520→              if (pass === 'opaque' && nbOpaque) continue
+   521→   521→              if (pass === 'cutout' && nbCutout) continue
+   522→   522→              if (pass === 'translucent' && nbTranslucent) continue
+   523→   523→            }
+   524→   524→            const tile = def.tiles[face.faceKind]
+   525→   525→            const [u0, v0, u1, v1] = tileUV(tile)
+   526→   526→            const shade = face.faceKind === 0 ? 1.0 : face.faceKind === 2 ? 0.55 : 0.8
+   527→   527→            const r = shade, g = shade, b = shade
+   528→   528→
+   529→   529→            if (isCross) {
+   530→   530→              // Diagonal X-shaped plant (flowers, cactus). Two crossed quads.
+   531→   531→              this.pushCrossFace(positions, normals, uvs, colors, wx, ly, wz, u0, v0, u1, v1, r, g, b)
+   532→   532→              hasGeometry = true
+   533→   533→              continue
+   534→   534→            }
+   535→   535→            if (isSlab) {
+   536→   536→              // Slab occupies bottom half. Move top face down to y+0.5.
+   537→   537→              this.pushSlabFace(positions, normals, uvs, colors, face, wx, ly, wz, u0, v0, u1, v1, r, g, b)
+   538→   538→              hasGeometry = true
+   539→   539→              continue
+   540→   540→            }
+   541→   541→
+   542→   542→            for (const c of face.corners) {
+   543→   543→              positions.push(wx + c[0], ly + c[1], wz + c[2])
+   544→   544→              normals.push(face.n[0], face.n[1], face.n[2])
+   545→   545→              colors.push(r, g, b)
+   546→   546→            }
+   547→   547→            uvs.push(u0, v0, u1, v0, u1, v1, u0, v1)
+   548→   548→            hasGeometry = true
+   549→   549→          }
+   550→   550→        }
+   551→   551→      }
+   552→   552→    }
+   553→   553→
+   554→   554→    if (!hasGeometry) return null
+   555→   555→
+   556→   556→    const faceCount = positions.length / 3 / 4
+   557→   557→    const indices = new Uint32Array(faceCount * 6)
+   558→   558→    for (let f = 0; f < faceCount; f++) {
+   559→   559→      const o = f * 4
+   560→   560→      indices[f * 6 + 0] = o + 0
+   561→   561→      indices[f * 6 + 1] = o + 1
+   562→   562→      indices[f * 6 + 2] = o + 2
+   563→   563→      indices[f * 6 + 3] = o + 0
+   564→   564→      indices[f * 6 + 4] = o + 2
+   565→   565→      indices[f * 6 + 5] = o + 3
+   566→   566→    }
+   567→   567→
+   568→   568→    const geo = new THREE.BufferGeometry()
+   569→   569→    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+   570→   570→    geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3))
+   571→   571→    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+   572→   572→    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
+   573→   573→    geo.setIndex(new THREE.BufferAttribute(indices, 1))
+   574→   574→    geo.computeBoundingSphere()
+   575→   575→    return geo
+   576→   576→  }
+   577→   577→
+   578→   578→  /** Push two diagonal quads for X-shaped plant blocks (flowers, cactus, etc.). */
+   579→   579→  private pushCrossFace(positions: number[], normals: number[], uvs: number[], colors: number[],
+   580→   580→                        wx: number, ly: number, wz: number,
+   581→   581→                        u0: number, v0: number, u1: number, v1: number,
+   582→   582→                        r: number, g: number, b: number): void {
+   583→   583→    // Quad 1: diagonal from (0,0,0) to (1,1,1)
+   584→   584→    const corners1: [number, number, number][] = [
+   585→   585→      [0, 0, 0], [1, 1, 0], [1, 1, 1], [0, 0, 1],
+   586→   586→    ]
+   587→   587→    // Quad 2: diagonal from (1,0,0) to (0,1,1)
+   588→   588→    const corners2: [number, number, number][] = [
+   589→   589→      [1, 0, 0], [0, 1, 0], [0, 1, 1], [1, 0, 1],
+   590→   590→    ]
+   591→   591→    for (const corners of [corners1, corners2]) {
+   592→   592→      for (const c of corners) {
+   593→   593→        positions.push(wx + c[0], ly + c[1], wz + c[2])
+   594→   594→        normals.push(0, 1, 0) // approximate
+   595→   595→        colors.push(r, g, b)
+   596→   596→      }
+   597→   597→      uvs.push(u0, v0, u1, v0, u1, v1, u0, v1)
+   598→   598→    }
+   599→   599→  }
+   600→   600→
+   601→   601→  /** Push a face for a slab (half-height block). */
+   602→   602→  private pushSlabFace(positions: number[], normals: number[], uvs: number[], colors: number[],
+   603→   603→                       face: { dir: readonly number[]; n: readonly number[]; faceKind: number; corners: [number, number, number][] },
+   604→   604→                       wx: number, ly: number, wz: number,
+   605→   605→                       u0: number, v0: number, u1: number, v1: number,
+   606→   606→                       r: number, g: number, b: number): void {
+   607→   607→    // For top face (faceKind 0), the corners already start at y=1 — we want y=0.5.
+   608→   608→    // For side faces, we want to lower the top two corners from y=1 to y=0.5.
+   609→   609→    // For bottom face, keep as is (already at y=0).
+   610→   610→    for (const c of face.corners) {
+   611→   611→      let y = c[1]
+   612→   612→      if (face.faceKind === 0) y = 0.5 // top face: lower from 1 to 0.5
+   613→   613→      else if (face.faceKind === 1 && y === 1) y = 0.5 // side face top edge
+   614→   614→      positions.push(wx + c[0], ly + y, wz + c[2])
+   615→   615→      normals.push(face.n[0], face.n[1], face.n[2])
+   616→   616→      colors.push(r, g, b)
+   617→   617→    }
+   618→   618→    uvs.push(u0, v0, u1, v0, u1, v1, u0, v1)
+   619→   619→  }
+   620→   620→
+   621→   621→  /** Raycast through voxel grid using DDA. Returns the first solid block hit + the face normal. */
+   622→   622→  raycast(origin: THREE.Vector3, dir: THREE.Vector3, maxDistance = 6): {
+   623→   623→    x: number; y: number; z: number; nx: number; ny: number; nz: number
+   624→   624→  } | null {
+   625→   625→    let x = Math.floor(origin.x)
+   626→   626→    let y = Math.floor(origin.y)
+   627→   627→    let z = Math.floor(origin.z)
+   628→   628→
+   629→   629→    const stepX = Math.sign(dir.x)
+   630→   630→    const stepY = Math.sign(dir.y)
+   631→   631→    const stepZ = Math.sign(dir.z)
+   632→   632→
+   633→   633→    const tDeltaX = dir.x !== 0 ? Math.abs(1 / dir.x) : Infinity
+   634→   634→    const tDeltaY = dir.y !== 0 ? Math.abs(1 / dir.y) : Infinity
+   635→   635→    const tDeltaZ = dir.z !== 0 ? Math.abs(1 / dir.z) : Infinity
+   636→   636→
+   637→   637→    const distToBoundary = (o: number, s: number) => {
+   638→   638→      if (s > 0) return Math.ceil(o) - o
+   639→   639→      if (s < 0) return o - Math.floor(o)
+   640→   640→      return Infinity
+   641→   641→    }
+   642→   642→    let tMaxX = dir.x !== 0 ? distToBoundary(origin.x, stepX) * tDeltaX : Infinity
+   643→   643→    let tMaxY = dir.y !== 0 ? distToBoundary(origin.y, stepY) * tDeltaY : Infinity
+   644→   644→    let tMaxZ = dir.z !== 0 ? distToBoundary(origin.z, stepZ) * tDeltaZ : Infinity
+   645→   645→
+   646→   646→    let nx = 0, ny = 0, nz = 0
+   647→   647→    let t = 0
+   648→   648→
+   649→   649→    while (t <= maxDistance) {
+   650→   650→      const block = this.getBlock(x, y, z)
+   651→   651→      // Skip air, water, and non-collidable decoration blocks (flowers, ladder).
+   652→   652→      if (block !== 'air' && block !== 'water' && block !== 'flower_red' && block !== 'flower_yellow' && block !== 'ladder') {
+   653→   653→        return { x, y, z, nx, ny, nz }
+   654→   654→      }
+   655→   655→      if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+   656→   656→        x += stepX
+   657→   657→        t = tMaxX
+   658→   658→        tMaxX += tDeltaX
+   659→   659→        nx = -stepX; ny = 0; nz = 0
+   660→   660→      } else if (tMaxY < tMaxZ) {
+   661→   661→        y += stepY
+   662→   662→        t = tMaxY
+   663→   663→        tMaxY += tDeltaY
+   664→   664→        nx = 0; ny = -stepY; nz = 0
+   665→   665→      } else {
+   666→   666→        z += stepZ
+   667→   667→        t = tMaxZ
+   668→   668→        tMaxZ += tDeltaZ
+   669→   669→        nx = 0; ny = 0; nz = -stepZ
+   670→   670→      }
+   671→   671→    }
+   672→   672→    return null
+   673→   673→  }
+   674→   674→
+   675→   675→  /** Finds the highest non-air block at (x, z). Returns -1 if column is empty. */
+   676→   676→  highestBlockY(x: number, z: number): number {
+   677→   677→    for (let y = WORLD_SIZE_Y - 1; y >= 0; y--) {
+   678→   678→      const b = this.getBlock(x, y, z)
+   679→   679→      if (b !== 'air' && b !== 'water' && b !== 'ice' && b !== 'flower_red' && b !== 'flower_yellow') return y
+   680→   680→    }
+   681→   681→    return -1
+   682→   682→  }
+   683→   683→}
+   684→   684→
+   685→   685→// Suppress unused import warnings (these are used downstream).
+   686→   686→export { ATLAS_COLS, ATLAS_ROWS, TILE_SIZE, isTransparent }
+   687→   687→

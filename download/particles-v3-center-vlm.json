@@ -1,0 +1,28 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "I have carefully examined the 2x zoomed-in center region of the Minecraft screenshot. I do not see any small cube-shaped objects floating in the air. The image shows grass blocks, dirt blocks, tree trunks, water, and a crosshair with a yellow particle effect at the center, but there are no tiny grass-textured cube particles (0.2 block size) floating in the air.\n\n**Count: 0**\n**Description:** No floating grass particles are visible in the provided image.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1785664285,
+  "id": "202608021751248d1aeec38d8344f7",
+  "model": "glm-5v-turbo",
+  "object": "chat.completion",
+  "request_id": "202608021751248d1aeec38d8344f7",
+  "usage": {
+    "completion_tokens": 103,
+    "completion_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "prompt_tokens": 477,
+    "prompt_tokens_details": {
+      "cached_tokens": 1
+    },
+    "total_tokens": 580
+  }
+}

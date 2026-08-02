@@ -385,8 +385,14 @@ export function buildAtlasTexture(): THREE.CanvasTexture {
   const canvas = buildAtlasCanvas()
   const tex = new THREE.CanvasTexture(canvas)
   tex.magFilter = THREE.NearestFilter
-  tex.minFilter = THREE.NearestMipmapNearestFilter
-  tex.generateMipmaps = true
+  // Use NearestFilter (no mipmaps) for the atlas. The atlas has NO padding between
+  // adjacent tiles, so enabling mipmaps (NearestMipmapNearestFilter) causes lower mip
+  // levels to average pixels across tile boundaries — producing visible color bleeding
+  // (e.g. green grass-top pixels from tile 1 smear onto the adjacent dirt tile 2, then
+  // appear on vertical dirt faces in-world). NearestFilter is also the classic pixel-art
+  // look for this style of game.
+  tex.minFilter = THREE.NearestFilter
+  tex.generateMipmaps = false
   tex.colorSpace = THREE.SRGBColorSpace
   tex.anisotropy = 1
   tex.premultiplyAlpha = true

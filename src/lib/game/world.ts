@@ -555,14 +555,22 @@ export class World {
 
     const faceCount = positions.length / 3 / 4
     const indices = new Uint32Array(faceCount * 6)
+    // NOTE: index winding is (0,2,1)(0,3,2) — REVERSED from the naive (0,1,2)(0,2,3).
+    // The FACE_CORNERS arrays are stored in an order whose right-hand-rule normal points
+    // INWARD (opposite to the declared outward normal in FACE_DEFS). With the opaque
+    // material using the default THREE.FrontSide, the naive winding would cull every
+    // outward-facing side, making opaque blocks appear see-through. Reversing the index
+    // order flips the winding so the outward face is the front face (rendered), while
+    // leaving UV-to-corner mapping intact (so textures are not mirrored). This single
+    // index change fixes regular quads, pushCrossFace quads, and pushSlabFace quads.
     for (let f = 0; f < faceCount; f++) {
       const o = f * 4
       indices[f * 6 + 0] = o + 0
-      indices[f * 6 + 1] = o + 1
-      indices[f * 6 + 2] = o + 2
+      indices[f * 6 + 1] = o + 2
+      indices[f * 6 + 2] = o + 1
       indices[f * 6 + 3] = o + 0
-      indices[f * 6 + 4] = o + 2
-      indices[f * 6 + 5] = o + 3
+      indices[f * 6 + 4] = o + 3
+      indices[f * 6 + 5] = o + 2
     }
 
     const geo = new THREE.BufferGeometry()
