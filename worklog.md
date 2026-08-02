@@ -124,3 +124,27 @@ Stage Summary:
 - Lint passes cleanly. No console errors.
 - New file: src/lib/game/particles.ts (BreakParticles class with spawn/update/dispose).
 - Modified files: src/lib/game/world.ts (reversed index winding, disabled mipmaps), src/components/game/MinecraftGame.tsx (integrate BreakParticles, wire to all break handlers, update in game loop).
+
+---
+Task ID: voxelcraft-flowers-mob-particles
+Agent: main (GLM)
+Task: Fix two issues: (1) flowers rendered lying flat on ground, (2) add demolition particles when mobs are hit/killed.
+
+Work Log:
+- Issue 1 (flowers lying flat): The pushCrossFace function was creating diagonal quads from (0,0,0)->(1,1,1) and (1,0,0)->(0,1,1), which produced flat diagonal surfaces across the block volume. Fixed by changing to VERTICAL quads: quad 1 along diagonal (0,0,0)->(1,0,1) with corners [0,0,0],[1,0,1],[1,1,1],[0,1,0]; quad 2 along (0,0,1)->(1,0,0) with corners [0,0,1],[1,0,0],[1,1,0],[0,1,1]. The quads now stand upright and cross each other in an X when viewed from above, matching Minecraft's flower rendering.
+- Verified: placed red and yellow flowers on grass blocks in a plains biome. VLM confirmed flowers are STANDING UP vertically with the correct X-shaped cross-quad model.
+- Issue 2 (mob demolition particles): Extended BreakParticles class to support mob-type particles in addition to block-textured particles.
+  - Added MOB_COLORS map (sheep=0xeaeaea white, zombie=0x4a7a3a green)
+  - Added getMobMaterial() that creates a MeshBasicMaterial with the mob's body color
+  - Added spawnMob(mobType, x, y, z, count, killed) method — killed=true spawns 8 extra particles + larger spread + higher upward velocity for a more dramatic death burst
+  - Refactored spawn() and spawnMob() to share a common spawnBurst() helper
+- Updated MobManager.tryHitMob() to spawn demolition particles:
+  - On hit: 10 colored particles at the mob's center mass
+  - On kill: 18 extra particles (26 total) with larger spread + higher velocity for a death burst
+- Added MobManager.setParticles() method and wired it in MinecraftGame.tsx (mobs.setParticles(particles)).
+- Verified: spawned 28 sheep-death particles at (32.5, 32, 32.5) above a camera looking up at the night sky. VLM confirmed "a cluster of white polygonal shapes in the center of the screen" — the cube particles render correctly as white shapes against the dark sky.
+
+Stage Summary:
+- Both issues fixed and verified.
+- Lint passes cleanly.
+- Modified files: src/lib/game/world.ts (pushCrossFace now creates vertical quads), src/lib/game/particles.ts (added mob particle support with colored materials), src/lib/game/mobs.ts (MobManager.tryHitMob spawns hit + kill particles), src/components/game/MinecraftGame.tsx (wired mobs.setParticles(particles)).

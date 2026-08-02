@@ -184,6 +184,9 @@ export default function MinecraftGame() {
     post.setEnabled(s.postProcessing)
     post.setBloomStrength(s.bloom ? 0.5 : 0)
     const particles = new BreakParticles(scene, atlas)
+    // Wire the particle system into the mob manager so mob hits/kills spawn
+    // demolition particles.
+    mobs.setParticles(particles)
 
     const input: InputState = {
       forward: false, back: false, left: false, right: false,

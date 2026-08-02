@@ -583,23 +583,26 @@ export class World {
     return geo
   }
 
-  /** Push two diagonal quads for X-shaped plant blocks (flowers, cactus, etc.). */
+  /** Push two vertical diagonal quads for X-shaped plant blocks (flowers, etc.).
+   *  The quads stand upright (vertical) and cross each other in an X when
+   *  viewed from above, mimicking Minecraft's flower rendering. */
   private pushCrossFace(positions: number[], normals: number[], uvs: number[], colors: number[],
                         wx: number, ly: number, wz: number,
                         u0: number, v0: number, u1: number, v1: number,
                         r: number, g: number, b: number): void {
-    // Quad 1: diagonal from (0,0,0) to (1,1,1)
+    // Quad 1: vertical plane along diagonal from (0,0,0)->(1,0,1)
+    // Corners: bottom-back, bottom-front, top-front, top-back
     const corners1: [number, number, number][] = [
-      [0, 0, 0], [1, 1, 0], [1, 1, 1], [0, 0, 1],
+      [0, 0, 0], [1, 0, 1], [1, 1, 1], [0, 1, 0],
     ]
-    // Quad 2: diagonal from (1,0,0) to (0,1,1)
+    // Quad 2: vertical plane along the other diagonal (0,0,1)->(1,0,0)
     const corners2: [number, number, number][] = [
-      [1, 0, 0], [0, 1, 0], [0, 1, 1], [1, 0, 1],
+      [0, 0, 1], [1, 0, 0], [1, 1, 0], [0, 1, 1],
     ]
     for (const corners of [corners1, corners2]) {
       for (const c of corners) {
         positions.push(wx + c[0], ly + c[1], wz + c[2])
-        normals.push(0, 1, 0) // approximate
+        normals.push(0, 1, 0) // approximate up-facing normal for lighting
         colors.push(r, g, b)
       }
       uvs.push(u0, v0, u1, v0, u1, v1, u0, v1)

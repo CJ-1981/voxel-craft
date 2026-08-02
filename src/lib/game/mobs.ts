@@ -5,6 +5,7 @@ import * as THREE from 'three'
 import { World } from './world'
 import { isSolid } from './blocks'
 import { Player } from './player'
+import type { BreakParticles } from './particles'
 
 export type MobType = 'sheep' | 'zombie'
 
@@ -283,6 +284,9 @@ export class Mob {
 export class MobManager {
   mobs: Mob[] = []
   scene: THREE.Scene
+  /** Particle system reference (set by the game component) — used to spawn
+   *  demolition particles when mobs are hit/killed. */
+  particles: BreakParticles | null = null
   /** Cooldown before next spawn tick. */
   private spawnTimer = 0
   /** Cooldown before next despawn check. */
@@ -291,6 +295,11 @@ export class MobManager {
 
   constructor(scene: THREE.Scene) {
     this.scene = scene
+  }
+
+  /** Attach a particle system so mob hits/kills spawn demolition particles. */
+  setParticles(p: BreakParticles): void {
+    this.particles = p
   }
 
   /** Called every frame. Handles spawn/despawn + mob updates. */
@@ -347,7 +356,9 @@ export class MobManager {
     }
   }
 
-  /** Player attacked a block — check if any mob is hit by the ray and damage it. */
+  /** Player attacked a block — check if any mob is hit by the ray and damage it.
+   *  Returns true if a mob was hit. Also spawns demolition particles on hit
+   *  and a larger burst on kill. */
   tryHitMob(origin: THREE.Vector3, dir: THREE.Vector3, maxDistance: number): boolean {
     let closestMob: Mob | null = null
     let closestDist = maxDistance
@@ -374,8 +385,30 @@ export class MobManager {
       }
     }
     if (closestMob) {
+      // Spawn hit particles at the mob's center mass.
+      if (this.particles) {
+        this.particles.spawnMob(
+          closestMob.type,
+          closestMob.position.x,
+          closestMob.position.y + closestMob.height / 2,
+          closestMob.position.z,
+          10,
+          false,
+        )
+      }
       const killed = closestMob.takeDamage(7) // 7 damage per hit (sword)
       if (killed) {
+        // Spawn a larger burst of particles on death.
+        if (this.particles) {
+          this.particles.spawnMob(
+            closestMob.type,
+            closestMob.position.x,
+            closestMob.position.y + closestMob.height / 2,
+            closestMob.position.z,
+            18,
+            true,
+          )
+        }
         closestMob.dispose(this.scene)
         const i = this.mobs.indexOf(closestMob)
         if (i >= 0) this.mobs.splice(i, 1)
