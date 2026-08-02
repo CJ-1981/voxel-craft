@@ -33,28 +33,46 @@ function idx(x: number, y: number, z: number): number {
 export class World {
   /** Flat array of block IDs (0 = air). */
   data: Uint8Array
-  /** One opaque mesh + one transparent mesh per chunk. */
+  /** One opaque mesh + three pass meshes per chunk (opaque / cutout / translucent). */
   chunkOpaqueMeshes: (THREE.Mesh | null)[]
-  chunkTransparentMeshes: (THREE.Mesh | null)[]
+  chunkCutoutMeshes: (THREE.Mesh | null)[]
+  chunkTranslucentMeshes: (THREE.Mesh | null)[]
   /** Shared geometry & material. */
   private opaqueMaterial: THREE.Material
-  private transparentMaterial: THREE.Material
+  private cutoutMaterial: THREE.Material
+  private translucentMaterial: THREE.Material
 
   constructor(scene: THREE.Scene, atlasTexture: THREE.Texture) {
     this.data = new Uint8Array(WORLD_SIZE_X * WORLD_SIZE_Y * WORLD_SIZE_Z)
     this.chunkOpaqueMeshes = new Array(CHUNKS_X * CHUNKS_Z).fill(null)
-    this.chunkTransparentMeshes = new Array(CHUNKS_X * CHUNKS_Z).fill(null)
+    this.chunkCutoutMeshes = new Array(CHUNKS_X * CHUNKS_Z).fill(null)
+    this.chunkTranslucentMeshes = new Array(CHUNKS_X * CHUNKS_Z).fill(null)
 
+    // Opaque pass: solid blocks (grass, dirt, stone, wood, etc.).
     this.opaqueMaterial = new THREE.MeshLambertMaterial({
       map: atlasTexture,
-      alphaTest: 0.1,
+      alphaTest: 0.5,
     })
-    this.transparentMaterial = new THREE.MeshLambertMaterial({
+    // Cutout pass: blocks with binary alpha (leaves). depthWrite=true so leaves
+    // correctly occlude geometry behind them; DoubleSide so you can see leaves
+    // from inside the canopy.
+    this.cutoutMaterial = new THREE.MeshLambertMaterial({
+      map: atlasTexture,
+      transparent: false,
+      alphaTest: 0.5,
+      side: THREE.DoubleSide,
+      depthWrite: true,
+    })
+    // Translucent pass: water and glass. depthWrite=true so cube faces don't
+    // see through themselves; transparent=true with blended alpha for real
+    // translucency.
+    this.translucentMaterial = new THREE.MeshLambertMaterial({
       map: atlasTexture,
       transparent: true,
-      opacity: 0.85,
-      depthWrite: false,
+      opacity: 0.75,
+      depthWrite: true,
       side: THREE.DoubleSide,
+      alphaTest: 0.05,
     })
 
     this.generate()
@@ -224,21 +242,28 @@ export class World {
     const i = cx + cz * CHUNKS_X
     // Remove old meshes.
     const oldOpaque = this.chunkOpaqueMeshes[i]
-    const oldTrans = this.chunkTransparentMeshes[i]
+    const oldCut = this.chunkCutoutMeshes[i]
+    const oldTrans = this.chunkTranslucentMeshes[i]
     if (oldOpaque) {
       scene.remove(oldOpaque)
       oldOpaque.geometry.dispose()
       this.chunkOpaqueMeshes[i] = null
     }
+    if (oldCut) {
+      scene.remove(oldCut)
+      oldCut.geometry.dispose()
+      this.chunkCutoutMeshes[i] = null
+    }
     if (oldTrans) {
       scene.remove(oldTrans)
       oldTrans.geometry.dispose()
-      this.chunkTransparentMeshes[i] = null
+      this.chunkTranslucentMeshes[i] = null
     }
 
     // Build geometry by walking all blocks in the chunk.
-    const opaque = this.buildChunkGeometry(cx, cz, false)
-    const transparent = this.buildChunkGeometry(cx, cz, true)
+    const opaque = this.buildChunkGeometry(cx, cz, 'opaque')
+    const cutout = this.buildChunkGeometry(cx, cz, 'cutout')
+    const translucent = this.buildChunkGeometry(cx, cz, 'translucent')
 
     if (opaque) {
       const mesh = new THREE.Mesh(opaque, this.opaqueMaterial)
@@ -246,16 +271,23 @@ export class World {
       this.chunkOpaqueMeshes[i] = mesh
       scene.add(mesh)
     }
-    if (transparent) {
-      const mesh = new THREE.Mesh(transparent, this.transparentMaterial)
-      mesh.name = `chunk_trans_${cx}_${cz}`
+    if (cutout) {
+      const mesh = new THREE.Mesh(cutout, this.cutoutMaterial)
+      mesh.name = `chunk_cutout_${cx}_${cz}`
       mesh.renderOrder = 1
-      this.chunkTransparentMeshes[i] = mesh
+      this.chunkCutoutMeshes[i] = mesh
+      scene.add(mesh)
+    }
+    if (translucent) {
+      const mesh = new THREE.Mesh(translucent, this.translucentMaterial)
+      mesh.name = `chunk_trans_${cx}_${cz}`
+      mesh.renderOrder = 2
+      this.chunkTranslucentMeshes[i] = mesh
       scene.add(mesh)
     }
   }
 
-  private buildChunkGeometry(cx: number, cz: number, transparentPass: boolean): THREE.BufferGeometry | null {
+  private buildChunkGeometry(cx: number, cz: number, pass: 'opaque' | 'cutout' | 'translucent'): THREE.BufferGeometry | null {
     const positions: number[] = []
     const normals: number[] = []
     const uvs: number[] = []
@@ -318,15 +350,31 @@ export class World {
           const block = this.getBlock(wx, ly, wz)
           if (block === 'air') continue
           const def = BLOCKS[block]
-          const isTransparentBlock = !!def.transparent
-          if (transparentPass !== isTransparentBlock) continue
+          const isTranslucent = !!def.translucent
+          const isCutout = !!def.transparent && !isTranslucent
+          // Route block to the correct pass.
+          if (pass === 'opaque' && (def.transparent)) continue
+          if (pass === 'cutout' && !isCutout) continue
+          if (pass === 'translucent' && !isTranslucent) continue
 
           for (const face of FACE_DEFS) {
             const nb = this.getBlockForCulling(wx + face.dir[0], ly + face.dir[1], wz + face.dir[2])
-            // Cull rule: don't render face if neighbor is opaque (same pass).
-            // For transparent blocks, also don't render between two of the same type (e.g. water-water).
-            if (!isTransparent(nb)) continue
-            if (isTransparentBlock && nb === block) continue
+            // Cull rule: don't render a face if neighbor is in the same pass
+            // AND of the same type (so two adjacent water blocks don't double-render,
+            // and two adjacent leaves don't show internal faces).
+            // Always render face if neighbor is air (any pass).
+            if (nb === block) continue
+            // Don't render face between two blocks in the same pass unless neighbor is air.
+            if (nb !== 'air') {
+              const nbDef = BLOCKS[nb]
+              const nbTranslucent = !!nbDef.translucent
+              const nbCutout = !!nbDef.transparent && !nbTranslucent
+              const nbOpaque = !nbDef.transparent
+              if (pass === 'opaque' && nbOpaque) continue
+              if (pass === 'cutout' && nbCutout) continue
+              if (pass === 'translucent' && nbTranslucent) continue
+              // Otherwise: face between this and a different-pass block — render.
+            }
 
             const tile = def.tiles[face.faceKind]
             const [u0, v0, u1, v1] = tileUV(tile)
@@ -337,7 +385,6 @@ export class World {
             const g = shade
             const b = shade
 
-            const base = positions.length / 3
             for (const c of face.corners) {
               positions.push(wx + c[0], ly + c[1], wz + c[2])
               normals.push(face.n[0], face.n[1], face.n[2])
@@ -346,13 +393,7 @@ export class World {
             // UVs: bl, br, tr, tl  ->  (u0,v0),(u1,v0),(u1,v1),(u0,v1)
             uvs.push(u0, v0, u1, v0, u1, v1, u0, v1)
 
-            // Two triangles: base, base+1, base+2  and  base, base+2, base+3
-            // We use non-indexed geometry for simplicity (push 6 vertices via duplication).
-            // Already pushed 4 vertices; we need 6. So duplicate by re-pushing corners.
-            // Switch to indexed instead for efficiency:
-            // (we'll convert below)
             hasGeometry = true
-            // Add indices later — for now duplicate vertices.
           }
         }
       }

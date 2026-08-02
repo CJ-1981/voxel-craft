@@ -94,7 +94,20 @@ function drawSand(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
 }
 
 function drawWater(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  noisy(ctx, ox, oy, [54, 96, 180], [[46, 86, 168], [62, 106, 196], [50, 92, 176]], 0.3)
+  // Mostly transparent with subtle ripples so the alpha-test pass keeps
+  // the surface visible without making it opaque.
+  for (let y = 0; y < TILE_SIZE; y++) {
+    for (let x = 0; x < TILE_SIZE; x++) {
+      // Wave streaks
+      const ripple = Math.sin((x + y) * 0.7) + Math.sin(x * 0.4) * 0.5
+      const alpha = 0.55 + ripple * 0.18
+      const r = 54 + Math.floor(Math.random() * 8)
+      const g = 96 + Math.floor(Math.random() * 12)
+      const b = 180 + Math.floor(Math.random() * 16)
+      ctx.fillStyle = `rgba(${r},${g},${b},${Math.max(0.35, Math.min(0.9, alpha))})`
+      ctx.fillRect(ox + x, oy + y, 1, 1)
+    }
+  }
 }
 
 function drawPlanks(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
@@ -131,21 +144,23 @@ function drawBedrock(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
 }
 
 function drawGlass(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  // Mostly transparent
+  // Mostly transparent (alpha ~0.25) with a visible border + highlight.
+  ctx.clearRect(ox, oy, TILE_SIZE, TILE_SIZE)
   for (let y = 0; y < TILE_SIZE; y++) {
     for (let x = 0; x < TILE_SIZE; x++) {
-      fill(ctx, ox + x, oy + y, [200, 220, 230])
+      ctx.fillStyle = 'rgba(200,220,230,0.22)'
+      ctx.fillRect(ox + x, oy + y, 1, 1)
     }
   }
-  // Border
-  ctx.fillStyle = 'rgb(160,200,220)'
+  // Border (opaque frame)
+  ctx.fillStyle = 'rgb(180,210,225)'
   for (let i = 0; i < TILE_SIZE; i++) {
-    fill(ctx, ox + i, oy + 0, [160, 200, 220])
-    fill(ctx, ox + i, oy + 15, [160, 200, 220])
-    fill(ctx, ox + 0, oy + i, [160, 200, 220])
-    fill(ctx, ox + 15, oy + i, [160, 200, 220])
+    fill(ctx, ox + i, oy + 0, [180, 210, 225])
+    fill(ctx, ox + i, oy + 15, [180, 210, 225])
+    fill(ctx, ox + 0, oy + i, [180, 210, 225])
+    fill(ctx, ox + 15, oy + i, [180, 210, 225])
   }
-  // Highlight
+  // Highlight streak (opaque)
   for (let i = 2; i < 6; i++) {
     fill(ctx, ox + i, oy + i, [240, 250, 255])
   }
@@ -239,6 +254,7 @@ export function buildAtlasTexture(): THREE.CanvasTexture {
   tex.generateMipmaps = true
   tex.colorSpace = THREE.SRGBColorSpace
   tex.anisotropy = 1
+  tex.premultiplyAlpha = true
   return tex
 }
 

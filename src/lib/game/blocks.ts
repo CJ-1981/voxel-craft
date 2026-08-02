@@ -22,6 +22,8 @@ export interface BlockDef {
   name: string
   /** Whether light passes through (used for face culling). */
   transparent?: boolean
+  /** Translucent blocks (water, glass) render in a separate blended pass. */
+  translucent?: boolean
   /** Whether the player collides with this block. */
   solid?: boolean
   /** Liquid blocks (water) — non-solid and semi-transparent. */
@@ -38,11 +40,11 @@ export const BLOCKS: Record<BlockType, BlockDef> = {
   wood: { type: 'wood', name: 'Wood Log', solid: true, tiles: [4, 5, 4] },
   leaves: { type: 'leaves', name: 'Leaves', transparent: true, solid: true, tiles: [6, 6, 6] },
   sand: { type: 'sand', name: 'Sand', solid: true, tiles: [7, 7, 7] },
-  water: { type: 'water', name: 'Water', transparent: true, solid: false, liquid: true, tiles: [8, 8, 8] },
+  water: { type: 'water', name: 'Water', transparent: true, translucent: true, solid: false, liquid: true, tiles: [8, 8, 8] },
   planks: { type: 'planks', name: 'Planks', solid: true, tiles: [9, 9, 9] },
   cobblestone: { type: 'cobblestone', name: 'Cobblestone', solid: true, tiles: [10, 10, 10] },
   bedrock: { type: 'bedrock', name: 'Bedrock', solid: true, tiles: [11, 11, 11] },
-  glass: { type: 'glass', name: 'Glass', transparent: true, solid: true, tiles: [12, 12, 12] },
+  glass: { type: 'glass', name: 'Glass', transparent: true, translucent: true, solid: true, tiles: [12, 12, 12] },
   brick: { type: 'brick', name: 'Brick', solid: true, tiles: [13, 13, 13] },
   gold: { type: 'gold', name: 'Gold Ore', solid: true, tiles: [14, 14, 14] },
   diamond: { type: 'diamond', name: 'Diamond', solid: true, tiles: [15, 15, 15] },
