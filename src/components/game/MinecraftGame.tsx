@@ -3,9 +3,13 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three'
 import { World, WORLD_SIZE_X, WORLD_SIZE_Z } from '@/lib/game/world'
-import { Player, InputState } from '@/lib/game/player'
+import { Player, InputState, GameMode } from '@/lib/game/player'
 import { BLOCKS, HOTBAR_BLOCKS } from '@/lib/game/blocks'
 import { buildAtlasTexture, tileDataUrl } from '@/lib/game/textures'
+import { DayNightCycle } from '@/lib/game/daynight'
+import { MobManager } from '@/lib/game/mobs'
+import { SoundSystem } from '@/lib/game/sound'
+import { PostProcessing } from '@/lib/game/postprocessing'
 
 interface GameHandle {
   world: World
@@ -15,43 +19,106 @@ interface GameHandle {
   renderer: THREE.WebGLRenderer
   input: InputState
   selectionMesh: THREE.LineSegments
+  dayNight: DayNightCycle
+  mobs: MobManager
+  sound: SoundSystem
+  post: PostProcessing
   dispose: () => void
 }
 
-// Detect touch-only devices (phones, tablets without mouse).
 function isTouchDevice(): boolean {
   if (typeof window === 'undefined') return false
-  return (
-    'ontouchstart' in window ||
-    navigator.maxTouchPoints > 0 ||
-    window.matchMedia('(pointer: coarse)').matches
-  )
+  return 'ontouchstart' in window || navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches
 }
-
-// Detect pointer-lock support (excluded on iOS Safari).
 function supportsPointerLock(): boolean {
   if (typeof document === 'undefined') return false
   return typeof document.documentElement.requestPointerLock === 'function'
+}
+
+interface Settings {
+  fov: number
+  sensitivity: number
+  renderDistance: number
+  volume: number
+  soundEnabled: boolean
+  postProcessing: boolean
+  bloom: boolean
+}
+
+const DEFAULT_SETTINGS: Settings = {
+  fov: 75,
+  sensitivity: 0.0022,
+  renderDistance: 64,
+  volume: 0.5,
+  soundEnabled: true,
+  // Default OFF — post-processing is heavy on low-end devices. Users can
+  // enable it in Settings for the cinematic bloom/vignette look.
+  postProcessing: false,
+  bloom: true,
 }
 
 export default function MinecraftGame() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const gameRef = useRef<GameHandle | null>(null)
   const selectedSlotRef = useRef(0)
-  // "Playing" = the game loop is actively updating physics. True on desktop
-  // when pointer is locked, AND on mobile after the user taps Play.
+  const settingsRef = useRef<Settings>(DEFAULT_SETTINGS)
   const playingRef = useRef(false)
+  // For double-tap-to-fly detection.
+  const lastJumpTapRef = useRef(0)
+  // Footstep audio accumulator.
+  const stepDistRef = useRef(0)
 
   const [started, setStarted] = useState(false)
   const [paused, setPaused] = useState(false)
-  const [showMenu, setShowMenu] = useState(false) // in-game menu (restart/help)
+  const [showMenu, setShowMenu] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [selectedSlot, setSelectedSlot] = useState(0)
   const [fps, setFps] = useState(0)
   const [position, setPosition] = useState({ x: 0, y: 0, z: 0 })
   const [hudReady, setHudReady] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
-  // Bump this number to force a full world/player reset (Restart button).
   const [worldSeed, setWorldSeed] = useState(0)
+  const [hasSave, setHasSave] = useState(false)
+  const [gameMode, setGameMode] = useState<GameMode>('survival')
+  const [health, setHealth] = useState(20)
+  const [hunger, setHunger] = useState(20)
+  const [oxygen, setOxygen] = useState(10)
+  const [timeOfDay, setTimeOfDay] = useState(0.3)
+  const [isNight, setIsNight] = useState(false)
+  const [mobCount, setMobCount] = useState(0)
+  const [flying, setFlying] = useState(false)
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
+  const [dead, setDead] = useState(false)
+
+  // Load settings from localStorage on mount.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('voxelcraft_settings')
+      if (raw) {
+        const s = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }
+        setSettings(s)
+        settingsRef.current = s
+      }
+    } catch { /* ignore */ }
+    setHasSave(World.hasSave())
+  }, [])
+
+  // Persist settings.
+  const saveSettings = useCallback((s: Settings) => {
+    setSettings(s)
+    settingsRef.current = s
+    try { localStorage.setItem('voxelcraft_settings', JSON.stringify(s)) } catch { /* ignore */ }
+    // Apply to live game.
+    const g = gameRef.current
+    if (g) {
+      g.camera.fov = s.fov
+      g.camera.updateProjectionMatrix()
+      g.sound.setVolume(s.volume)
+      g.sound.setEnabled(s.soundEnabled)
+      g.post.setEnabled(s.postProcessing)
+      g.post.setBloomStrength(s.bloom ? 0.5 : 0)
+    }
+  }, [])
 
   // ----- Initialize the Three.js world (re-runs when worldSeed changes) -----
   useEffect(() => {
@@ -62,7 +129,6 @@ export default function MinecraftGame() {
       canvas,
       antialias: false,
       powerPreference: 'high-performance',
-      // Helps Safari/iOS avoid the default low-power fallback.
       stencil: false,
     })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -73,24 +139,33 @@ export default function MinecraftGame() {
     scene.background = new THREE.Color(0x8fc4ff)
     scene.fog = new THREE.Fog(0x8fc4ff, 40, 80)
 
-    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500)
-
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x6b7a55, 0.85)
-    scene.add(hemi)
-    const sun = new THREE.DirectionalLight(0xfff4e0, 0.7)
-    sun.position.set(0.5, 1, 0.3)
-    scene.add(sun)
-    const ambient = new THREE.AmbientLight(0xffffff, 0.35)
-    scene.add(ambient)
+    const s = settingsRef.current
+    const camera = new THREE.PerspectiveCamera(s.fov, window.innerWidth / window.innerHeight, 0.1, 500)
 
     const atlas = buildAtlasTexture()
-    const world = new World(scene, atlas)
+    // Try to load saved world; if found, use the saved seed.
+    const meta = World.loadMeta()
+    const world = new World(scene, atlas, meta?.seed)
+    if (World.hasSave() && meta) {
+      const result = world.loadFromSave(scene)
+      if (!result) {
+        // Save was invalid — start fresh.
+        World.clearSave()
+      }
+    }
 
-    const spawnX = Math.floor(WORLD_SIZE_X / 2)
-    const spawnZ = Math.floor(WORLD_SIZE_Z / 2)
-    const spawnY = world.highestBlockY(spawnX, spawnZ) + 1
-    const player = new Player(spawnX + 0.5, spawnY, spawnZ + 0.5)
+    // Spawn player — either from save or world center.
+    const spawnX = meta ? meta.playerX : Math.floor(WORLD_SIZE_X / 2) + 0.5
+    const spawnZ = meta ? meta.playerZ : Math.floor(WORLD_SIZE_Z / 2) + 0.5
+    const spawnY = meta ? meta.playerY : world.highestBlockY(Math.floor(spawnX), Math.floor(spawnZ)) + 1
+    const player = new Player(spawnX, spawnY, spawnZ)
+    if (meta) {
+      player.yaw = meta.playerYaw
+      player.pitch = meta.playerPitch
+    }
+    player.gameMode = gameMode
 
+    // Selection wireframe.
     const boxGeo = new THREE.BoxGeometry(1.001, 1.001, 1.001)
     const edges = new THREE.EdgesGeometry(boxGeo)
     const lineMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.5 })
@@ -98,19 +173,33 @@ export default function MinecraftGame() {
     selectionMesh.visible = false
     scene.add(selectionMesh)
 
+    const dayNight = new DayNightCycle(scene)
+    const mobs = new MobManager(scene)
+    const sound = new SoundSystem()
+    sound.setVolume(s.volume)
+    sound.setEnabled(s.soundEnabled)
+    const post = new PostProcessing(renderer, scene, camera)
+    post.setEnabled(s.postProcessing)
+    post.setBloomStrength(s.bloom ? 0.5 : 0)
+
     const input: InputState = {
-      forward: false, back: false, left: false, right: false, jump: false, sprint: false,
+      forward: false, back: false, left: false, right: false,
+      jump: false, sprint: false, crouch: false,
     }
 
     gameRef.current = {
       world, player, scene, camera, renderer, input, selectionMesh,
+      dayNight, mobs, sound, post,
       dispose: () => {
         renderer.dispose()
         atlas.dispose()
         boxGeo.dispose()
         edges.dispose()
         lineMat.dispose()
-        // Dispose all chunk geometries.
+        dayNight.dispose()
+        mobs.dispose()
+        sound.dispose()
+        post.dispose()
         scene.traverse(obj => {
           if (obj instanceof THREE.Mesh) obj.geometry?.dispose?.()
         })
@@ -128,6 +217,7 @@ export default function MinecraftGame() {
     let fpsAccum = 0
     let rafId = 0
     let hudAccum = 0
+    let autoSaveAccum = 0
 
     const loop = () => {
       rafId = requestAnimationFrame(loop)
@@ -135,17 +225,53 @@ export default function MinecraftGame() {
       const dt = (now - lastTime) / 1000
       lastTime = now
 
-      // Update player physics only while actively playing.
       if (playingRef.current) {
         player.update(world, input, dt)
+        mobs.update(world, player, dayNight.isNight(), dt)
+        dayNight.update(dt, player.position)
+
+        // Footstep audio: when walking on ground, play a sound every ~0.35m.
+        const horizSpeed = Math.sqrt(player.velocity.x * player.velocity.x + player.velocity.z * player.velocity.z)
+        if (player.onGround && horizSpeed > 0.5) {
+          stepDistRef.current += horizSpeed * dt
+          if (stepDistRef.current > 0.4) {
+            sound.footstep()
+            stepDistRef.current = 0
+          }
+        }
+
+        // Underwater ambience boost.
+        sound.setAmbientMultiplier(player.stats.headInWater ? 4 : 1)
+
+        // Death check.
+        if (player.stats.health <= 0 && !dead) {
+          setDead(true)
+          playingRef.current = false
+          setPaused(true)
+        }
+
+        // Auto-save every 30 seconds.
+        autoSaveAccum += dt
+        if (autoSaveAccum > 30) {
+          autoSaveAccum = 0
+          world.save({
+            x: player.position.x, y: player.position.y, z: player.position.z,
+            yaw: player.yaw, pitch: player.pitch,
+          })
+        }
+      } else {
+        // Still update day/night for ambient feel on menus.
+        dayNight.update(dt, player.position)
       }
 
+      // Sync camera.
       player.getEyePosition(eyePos)
       camera.position.copy(eyePos)
       const q = new THREE.Quaternion()
       q.setFromEuler(new THREE.Euler(player.pitch, player.yaw, 0, 'YXZ'))
       camera.quaternion.copy(q)
 
+      // Selection box.
       player.getLookDirection(lookDir)
       rayOrigin.copy(eyePos)
       const hit = world.raycast(rayOrigin, lookDir, 6)
@@ -156,8 +282,15 @@ export default function MinecraftGame() {
         selectionMesh.visible = false
       }
 
-      renderer.render(scene, camera)
+      // Render via post-processing composer (which includes the scene render
+      // pass), or fall back to direct rendering for performance.
+      if (post.enabled) {
+        post.render()
+      } else {
+        renderer.render(scene, camera)
+      }
 
+      // FPS.
       frameCount++
       fpsAccum += dt
       if (fpsAccum >= 0.5) {
@@ -166,6 +299,7 @@ export default function MinecraftGame() {
         fpsAccum = 0
       }
 
+      // HUD updates (4 Hz).
       hudAccum += dt
       if (hudAccum >= 0.25) {
         hudAccum = 0
@@ -174,6 +308,13 @@ export default function MinecraftGame() {
           y: Math.floor(player.position.y),
           z: Math.floor(player.position.z),
         })
+        setHealth(player.stats.health)
+        setHunger(player.stats.hunger)
+        setOxygen(player.stats.oxygen)
+        setTimeOfDay(dayNight.timeOfDay)
+        setIsNight(dayNight.isNight())
+        setMobCount(mobs.mobs.length)
+        setFlying(player.flying)
       }
     }
     loop()
@@ -183,23 +324,24 @@ export default function MinecraftGame() {
       camera.aspect = window.innerWidth / window.innerHeight
       camera.updateProjectionMatrix()
       renderer.setSize(window.innerWidth, window.innerHeight)
+      post.resize(window.innerWidth, window.innerHeight)
     }
     window.addEventListener('resize', onResize)
     window.addEventListener('orientationchange', onResize)
 
-    // ----- Desktop mouse look via pointer lock -----
+    // ----- Mouse look -----
     const onMouseMove = (e: MouseEvent) => {
       if (!playingRef.current) return
       if (supportsPointerLock() && document.pointerLockElement !== canvas) return
-      const sensitivity = 0.0022
-      player.yaw -= e.movementX * sensitivity
-      player.pitch -= e.movementY * sensitivity
+      const sens = settingsRef.current.sensitivity
+      player.yaw -= e.movementX * sens
+      player.pitch -= e.movementY * sens
       const limit = Math.PI / 2 - 0.01
       player.pitch = Math.max(-limit, Math.min(limit, player.pitch))
     }
     document.addEventListener('mousemove', onMouseMove)
 
-    // ----- Pointer lock change (desktop only) -----
+    // ----- Pointer lock change -----
     const onPointerLockChange = () => {
       if (!supportsPointerLock()) return
       const isLocked = document.pointerLockElement === canvas
@@ -207,8 +349,8 @@ export default function MinecraftGame() {
         playingRef.current = true
         setPaused(false)
         setShowMenu(false)
+        sound.resume()
       } else {
-        // Lost lock while playing -> pause.
         if (playingRef.current) {
           playingRef.current = false
           setPaused(true)
@@ -217,23 +359,62 @@ export default function MinecraftGame() {
     }
     document.addEventListener('pointerlockchange', onPointerLockChange)
 
-    // ----- Mouse click: break / place blocks (desktop) -----
+    // ----- Mouse click: break / place / attack -----
     const onMouseDown = (e: MouseEvent) => {
       if (!playingRef.current) return
-      // On desktop with pointer-lock support, only act when locked.
       if (supportsPointerLock() && document.pointerLockElement !== canvas) return
       const g = gameRef.current
       if (!g) return
       player.getEyePosition(rayOrigin)
       player.getLookDirection(lookDir)
-      const hit = g.world.raycast(rayOrigin, lookDir, 6)
-      if (!hit) return
 
       if (e.button === 0) {
+        // Left click: first try to hit a mob, else break a block.
+        const hitMob = mobs.tryHitMob(rayOrigin, lookDir, 6)
+        if (hitMob) {
+          sound.collect()
+          return
+        }
+        const hit = g.world.raycast(rayOrigin, lookDir, 6)
+        if (!hit) return
         const b = g.world.getBlock(hit.x, hit.y, hit.z)
         if (b === 'bedrock') return
+        // TNT: explode (3x3x3) instead of just breaking.
+        if (b === 'tnt') {
+          for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+              for (let dz = -1; dz <= 1; dz++) {
+                const tb = g.world.getBlock(hit.x + dx, hit.y + dy, hit.z + dz)
+                if (tb !== 'bedrock') {
+                  g.world.setBlockAndUpdate(g.scene, hit.x + dx, hit.y + dy, hit.z + dz, 'air')
+                }
+              }
+            }
+          }
+          sound.explosion()
+          // Damage nearby mobs.
+          for (const m of mobs.mobs) {
+            const mdx = m.position.x - (hit.x + 0.5)
+            const mdy = m.position.y - (hit.y + 0.5)
+            const mdz = m.position.z - (hit.z + 0.5)
+            const md = Math.sqrt(mdx * mdx + mdy * mdy + mdz * mdz)
+            if (md < 5) m.takeDamage(20)
+          }
+          // Damage player if too close.
+          const pdx = player.position.x - (hit.x + 0.5)
+          const pdy = player.position.y - (hit.y + 0.5)
+          const pdz = player.position.z - (hit.z + 0.5)
+          const pd = Math.sqrt(pdx * pdx + pdy * pdy + pdz * pdz)
+          if (pd < 5) player.takeDamage(Math.floor(15 - pd * 2), 'tnt')
+          return
+        }
         g.world.setBlockAndUpdate(g.scene, hit.x, hit.y, hit.z, 'air')
+        sound.blockBreak()
+        // Vibrate on mobile.
+        if (navigator.vibrate) navigator.vibrate(15)
       } else if (e.button === 2) {
+        const hit = g.world.raycast(rayOrigin, lookDir, 6)
+        if (!hit) return
         const px = hit.x + hit.nx
         const py = hit.y + hit.ny
         const pz = hit.z + hit.nz
@@ -241,6 +422,8 @@ export default function MinecraftGame() {
         if (Player.blockOverlapsPlayer(player.position.x, player.position.y, player.position.z, px, py, pz)) return
         const type = HOTBAR_BLOCKS[selectedSlotRef.current]
         g.world.setBlockAndUpdate(g.scene, px, py, pz, type)
+        sound.blockPlace()
+        if (navigator.vibrate) navigator.vibrate(10)
       }
     }
     canvas.addEventListener('mousedown', onMouseDown)
@@ -251,7 +434,6 @@ export default function MinecraftGame() {
       if (!g) return
       const c = e.code
       const k = e.key.toLowerCase()
-      // Esc opens the menu (only meaningful while playing on desktop).
       if (c === 'Escape' || k === 'escape') {
         if (playingRef.current) {
           playingRef.current = false
@@ -263,14 +445,31 @@ export default function MinecraftGame() {
         }
         return
       }
-      // Don't process movement keys if not playing.
+      // Toggle fly mode with double-tap Space (creative only).
+      if ((c === 'Space' || k === ' ') && player.gameMode === 'creative') {
+        const now = performance.now()
+        if (now - lastJumpTapRef.current < 300) {
+          player.flying = !player.flying
+          player.velocity.y = 0
+          setFlying(player.flying)
+          if (player.flying) sound.jump()
+        }
+        lastJumpTapRef.current = now
+      }
+      if (c === 'KeyF') {
+        // Toggle game mode (creative <-> survival).
+        player.gameMode = player.gameMode === 'creative' ? 'survival' : 'creative'
+        setGameMode(player.gameMode)
+        if (player.gameMode === 'survival') player.flying = false
+      }
       if (!playingRef.current) return
       if (c === 'KeyW' || c === 'ArrowUp' || k === 'w') input.forward = true
       else if (c === 'KeyS' || c === 'ArrowDown' || k === 's') input.back = true
       else if (c === 'KeyA' || c === 'ArrowLeft' || k === 'a') input.left = true
       else if (c === 'KeyD' || c === 'ArrowRight' || k === 'd') input.right = true
       else if (c === 'Space' || k === ' ') { input.jump = true; e.preventDefault() }
-      else if (c === 'ShiftLeft' || c === 'ShiftRight' || k === 'shift') input.sprint = true
+      else if (c === 'ShiftLeft' || c === 'ShiftRight' || k === 'shift') input.crouch = true
+      else if (c === 'ControlLeft' || c === 'ControlRight' || k === 'control') input.sprint = true
       else if (k >= '1' && k <= '9') {
         const n = parseInt(k, 10) - 1
         if (n < HOTBAR_BLOCKS.length) {
@@ -287,7 +486,8 @@ export default function MinecraftGame() {
       else if (c === 'KeyA' || c === 'ArrowLeft' || k === 'a') input.left = false
       else if (c === 'KeyD' || c === 'ArrowRight' || k === 'd') input.right = false
       else if (c === 'Space' || k === ' ') input.jump = false
-      else if (c === 'ShiftLeft' || c === 'ShiftRight' || k === 'shift') input.sprint = false
+      else if (c === 'ShiftLeft' || c === 'ShiftRight' || k === 'shift') input.crouch = false
+      else if (c === 'ControlLeft' || c === 'ControlRight' || k === 'control') input.sprint = false
     }
     document.addEventListener('keydown', onKeyDown)
     document.addEventListener('keyup', onKeyUp)
@@ -304,18 +504,15 @@ export default function MinecraftGame() {
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
 
-    // ----- Context menu: prevent -----
     const onContext = (e: Event) => e.preventDefault()
     canvas.addEventListener('contextmenu', onContext)
 
-    // ----- Mobile touch look (drag on right half of screen) -----
+    // ----- Mobile touch look -----
     let touchLookId: number | null = null
     let touchLastX = 0
     let touchLastY = 0
     const onTouchStart = (e: TouchEvent) => {
       if (!playingRef.current) return
-      // Only the look-drag (a touch that begins on the canvas, not on a UI button).
-      // We use the right half of the screen as the look zone.
       for (let i = 0; i < e.changedTouches.length; i++) {
         const t = e.changedTouches[i]
         if (t.clientX > window.innerWidth * 0.5 && touchLookId === null) {
@@ -334,7 +531,7 @@ export default function MinecraftGame() {
           const dy = t.clientY - touchLastY
           touchLastX = t.clientX
           touchLastY = t.clientY
-          const sens = 0.005
+          const sens = settingsRef.current.sensitivity * 2.5
           player.yaw -= dx * sens
           player.pitch -= dy * sens
           const limit = Math.PI / 2 - 0.01
@@ -344,9 +541,7 @@ export default function MinecraftGame() {
     }
     const onTouchEnd = (e: TouchEvent) => {
       for (let i = 0; i < e.changedTouches.length; i++) {
-        if (e.changedTouches[i].identifier === touchLookId) {
-          touchLookId = null
-        }
+        if (e.changedTouches[i].identifier === touchLookId) touchLookId = null
       }
     }
     canvas.addEventListener('touchstart', onTouchStart, { passive: true })
@@ -372,14 +567,13 @@ export default function MinecraftGame() {
       gameRef.current?.dispose()
       gameRef.current = null
     }
-  }, [worldSeed])
+  }, [worldSeed, gameMode])
 
-  // Detect mobile on mount.
   useEffect(() => {
     setIsMobile(isTouchDevice() || !supportsPointerLock())
   }, [])
 
-  // ----- Mobile action handlers (break / place / jump) -----
+  // ----- Mobile action handlers -----
   const mobileBreak = useCallback(() => {
     const g = gameRef.current
     if (!g || !playingRef.current) return
@@ -387,11 +581,27 @@ export default function MinecraftGame() {
     g.player.getEyePosition(eye)
     const look = new THREE.Vector3()
     g.player.getLookDirection(look)
+    // Try mob first.
+    if (g.mobs.tryHitMob(eye, look, 6)) {
+      g.sound.collect()
+      if (navigator.vibrate) navigator.vibrate(15)
+      return
+    }
     const hit = g.world.raycast(eye, look, 6)
     if (!hit) return
     const b = g.world.getBlock(hit.x, hit.y, hit.z)
     if (b === 'bedrock') return
+    if (b === 'tnt') {
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        const tb = g.world.getBlock(hit.x + dx, hit.y + dy, hit.z + dz)
+        if (tb !== 'bedrock') g.world.setBlockAndUpdate(g.scene, hit.x + dx, hit.y + dy, hit.z + dz, 'air')
+      }
+      g.sound.explosion()
+      return
+    }
     g.world.setBlockAndUpdate(g.scene, hit.x, hit.y, hit.z, 'air')
+    g.sound.blockBreak()
+    if (navigator.vibrate) navigator.vibrate(15)
   }, [])
 
   const mobilePlace = useCallback(() => {
@@ -403,16 +613,14 @@ export default function MinecraftGame() {
     g.player.getLookDirection(look)
     const hit = g.world.raycast(eye, look, 6)
     if (!hit) return
-    const px = hit.x + hit.nx
-    const py = hit.y + hit.ny
-    const pz = hit.z + hit.nz
+    const px = hit.x + hit.nx, py = hit.y + hit.ny, pz = hit.z + hit.nz
     if (g.world.getBlock(px, py, pz) !== 'air') return
     if (Player.blockOverlapsPlayer(g.player.position.x, g.player.position.y, g.player.position.z, px, py, pz)) return
-    const type = HOTBAR_BLOCKS[selectedSlotRef.current]
-    g.world.setBlockAndUpdate(g.scene, px, py, pz, type)
+    g.world.setBlockAndUpdate(g.scene, px, py, pz, HOTBAR_BLOCKS[selectedSlotRef.current])
+    g.sound.blockPlace()
+    if (navigator.vibrate) navigator.vibrate(10)
   }, [])
 
-  // Mobile jump: hold to keep jumping.
   const mobileJumpDown = useCallback(() => {
     if (gameRef.current) gameRef.current.input.jump = true
   }, [])
@@ -420,23 +628,34 @@ export default function MinecraftGame() {
     if (gameRef.current) gameRef.current.input.jump = false
   }, [])
 
-  // ----- Start / pause handlers -----
-  const startGame = useCallback(() => {
+  // ----- Game flow handlers -----
+  const startGame = useCallback((mode: GameMode = 'survival') => {
+    setGameMode(mode)
+    if (gameRef.current) {
+      gameRef.current.player.gameMode = mode
+      if (mode === 'creative') gameRef.current.player.flying = false
+    }
     setStarted(true)
     setPaused(false)
     setShowMenu(false)
+    setDead(false)
     playingRef.current = true
+    if (gameRef.current) {
+      gameRef.current.sound.init()
+      gameRef.current.sound.startAmbient()
+      gameRef.current.sound.resume()
+    }
     if (supportsPointerLock() && !isMobile) {
-      requestAnimationFrame(() => {
-        canvasRef.current?.requestPointerLock?.()
-      })
+      requestAnimationFrame(() => canvasRef.current?.requestPointerLock?.())
     }
   }, [isMobile])
 
   const resume = useCallback(() => {
     setPaused(false)
     setShowMenu(false)
+    setDead(false)
     playingRef.current = true
+    if (gameRef.current) gameRef.current.sound.resume()
     if (supportsPointerLock() && !isMobile) {
       canvasRef.current?.requestPointerLock?.()
     }
@@ -449,28 +668,100 @@ export default function MinecraftGame() {
     if (supportsPointerLock() && document.pointerLockElement === canvasRef.current) {
       document.exitPointerLock()
     }
+    // Save when opening the menu.
+    const g = gameRef.current
+    if (g) {
+      g.world.save({
+        x: g.player.position.x, y: g.player.position.y, z: g.player.position.z,
+        yaw: g.player.yaw, pitch: g.player.pitch,
+      })
+      setHasSave(true)
+    }
   }, [])
 
   const restartGame = useCallback(() => {
-    // Reset state and re-create world by bumping the seed.
     playingRef.current = false
     setStarted(false)
     setPaused(false)
     setShowMenu(false)
+    setDead(false)
+    World.clearSave()
+    setHasSave(false)
     setWorldSeed(s => s + 1)
   }, [])
+
+  const continueFromSave = useCallback(() => {
+    setStarted(true)
+    setPaused(false)
+    setShowMenu(false)
+    setDead(false)
+    playingRef.current = true
+    if (gameRef.current) {
+      gameRef.current.sound.init()
+      gameRef.current.sound.startAmbient()
+    }
+    if (supportsPointerLock() && !isMobile) {
+      requestAnimationFrame(() => canvasRef.current?.requestPointerLock?.())
+    }
+  }, [isMobile])
+
+  const respawn = useCallback(() => {
+    const g = gameRef.current
+    if (!g) return
+    const sx = Math.floor(WORLD_SIZE_X / 2) + 0.5
+    const sz = Math.floor(WORLD_SIZE_Z / 2) + 0.5
+    const sy = g.world.highestBlockY(Math.floor(sx), Math.floor(sz)) + 1
+    g.player.respawn(sx, sy, sz)
+    setDead(false)
+    setPaused(false)
+    setShowMenu(false)
+    playingRef.current = true
+    if (supportsPointerLock() && !isMobile) {
+      canvasRef.current?.requestPointerLock?.()
+    }
+  }, [isMobile])
 
   const selectSlot = useCallback((n: number) => {
     selectedSlotRef.current = n
     setSelectedSlot(n)
   }, [])
 
-  // Mobile movement: press-and-hold buttons set input flags.
   const setMove = useCallback((key: 'forward' | 'back' | 'left' | 'right', val: boolean) => {
     if (gameRef.current) gameRef.current.input[key] = val
   }, [])
 
+  const toggleFly = useCallback(() => {
+    const g = gameRef.current
+    if (!g) return
+    if (g.player.gameMode !== 'creative') return
+    g.player.flying = !g.player.flying
+    g.player.velocity.y = 0
+    setFlying(g.player.flying)
+  }, [])
+
   const active = started && !paused
+
+  // ----- Health/Hunger/Oxygen bars -----
+  const hearts = Array.from({ length: 10 }, (_, i) => {
+    const v = health - i * 2
+    if (v >= 2) return 'full'
+    if (v === 1) return 'half'
+    return 'empty'
+  })
+  const drumsticks = Array.from({ length: 10 }, (_, i) => {
+    const v = hunger - i * 2
+    if (v >= 2) return 'full'
+    if (v === 1) return 'half'
+    return 'empty'
+  })
+  const bubbles = Array.from({ length: 10 }, (_, i) => {
+    return oxygen - i >= 1 ? 'full' : 'empty'
+  })
+
+  // Time of day as HH:MM
+  const totalMin = Math.floor(timeOfDay * 24 * 60)
+  const hh = Math.floor(totalMin / 60).toString().padStart(2, '0')
+  const mm = (totalMin % 60).toString().padStart(2, '0')
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#8fc4ff] select-none">
@@ -496,29 +787,69 @@ export default function MinecraftGame() {
           <div>FPS: <span className="text-emerald-300">{fps}</span></div>
           <div>XYZ: {position.x} / {position.y} / {position.z}</div>
           <div>Block: {BLOCKS[HOTBAR_BLOCKS[selectedSlot]].name}</div>
+          <div>Time: {hh}:{mm} {isNight ? '🌙' : '☀️'}</div>
+          <div>Mode: {gameMode}{flying ? ' ✈' : ''}</div>
+          <div>Mobs: {mobCount}</div>
         </div>
       )}
 
-      {/* Top-right: menu button + controls help */}
+      {/* Top-right: menu + settings buttons */}
       {hudReady && started && (
         <div className="absolute top-3 right-3 flex flex-col items-end gap-2">
-          <button
-            onClick={openMenu}
-            className="pointer-events-auto px-3 py-1.5 rounded-md bg-black/50 hover:bg-black/70 text-white text-xs font-mono ring-1 ring-white/20 backdrop-blur-sm"
-            aria-label="Open menu"
-          >
-            ☰ Menu
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowSettings(true)}
+              className="pointer-events-auto px-3 py-1.5 rounded-md bg-black/50 hover:bg-black/70 text-white text-xs font-mono ring-1 ring-white/20 backdrop-blur-sm"
+              aria-label="Settings"
+            >
+              ⚙ Settings
+            </button>
+            <button
+              onClick={openMenu}
+              className="pointer-events-auto px-3 py-1.5 rounded-md bg-black/50 hover:bg-black/70 text-white text-xs font-mono ring-1 ring-white/20 backdrop-blur-sm"
+              aria-label="Open menu"
+            >
+              ☰ Menu
+            </button>
+          </div>
           {active && !isMobile && (
             <div className="pointer-events-none font-mono text-[11px] text-white/80 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)] text-right space-y-0.5">
-              <div>WASD — move</div>
-              <div>Space — jump / swim</div>
-              <div>Shift — sprint</div>
-              <div>Mouse — look</div>
-              <div>L-click — break</div>
-              <div>R-click — place</div>
-              <div>1-9 / wheel — select</div>
+              <div>WASD — move · Ctrl — sprint</div>
+              <div>Space — jump · Shift — crouch</div>
+              <div>Double-Space — fly (creative)</div>
+              <div>F — toggle creative</div>
+              <div>L-click — break/attack · R-click — place</div>
+              <div>1-9 / wheel — select block</div>
               <div>Esc — pause</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Bottom-left: health/hunger/oxygen bars (survival only) */}
+      {hudReady && active && gameMode === 'survival' && (
+        <div className="absolute bottom-20 left-1/2 -translate-x-1/2 flex flex-col items-center gap-0.5 pointer-events-none">
+          <div className="flex gap-0.5">
+            {hearts.map((h, i) => (
+              <span key={`h${i}`} className="text-sm" style={{ filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.9))' }}>
+                {h === 'full' ? '❤️' : h === 'half' ? '💔' : '🤍'}
+              </span>
+            ))}
+          </div>
+          <div className="flex gap-0.5">
+            {drumsticks.map((d, i) => (
+              <span key={`h${i}`} className="text-sm" style={{ filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.9))' }}>
+                {d === 'full' ? '🍗' : d === 'half' ? '🍖' : '🦴'}
+              </span>
+            ))}
+          </div>
+          {oxygen < 10 && (
+            <div className="flex gap-0.5">
+              {bubbles.map((b, i) => (
+                <span key={`b${i}`} className="text-sm">
+                  {b === 'full' ? '💧' : '•'}
+                </span>
+              ))}
             </div>
           )}
         </div>
@@ -531,7 +862,7 @@ export default function MinecraftGame() {
             <button
               key={type}
               onClick={() => selectSlot(i)}
-              className={`relative flex-shrink-0 w-10 h-10 sm:w-12 sm:h-12 rounded-sm border-2 transition-colors ${
+              className={`relative flex-shrink-0 w-9 h-9 sm:w-11 sm:h-11 rounded-sm border-2 transition-colors ${
                 i === selectedSlot ? 'border-white bg-white/15' : 'border-white/20 bg-black/30 hover:border-white/50'
               }`}
               title={BLOCKS[type].name}
@@ -551,11 +882,10 @@ export default function MinecraftGame() {
         </div>
       )}
 
-      {/* Mobile controls (only on touch devices, only while playing) */}
+      {/* Mobile controls */}
       {hudReady && isMobile && active && (
         <>
-          {/* Left side: movement D-pad */}
-          <div className="absolute bottom-24 left-4 grid grid-cols-3 grid-rows-3 gap-1 w-36 h-36 pointer-events-auto">
+          <div className="absolute bottom-24 left-4 grid grid-cols-3 grid-rows-3 gap-1 w-32 h-32 pointer-events-auto">
             <div />
             <button
               onTouchStart={(e) => { e.preventDefault(); setMove('forward', true) }}
@@ -586,30 +916,39 @@ export default function MinecraftGame() {
             <div />
             <div />
           </div>
-
-          {/* Right side: jump + break + place */}
           <div className="absolute bottom-24 right-4 flex flex-col items-end gap-2 pointer-events-auto">
             <button
               onTouchStart={(e) => { e.preventDefault(); mobileBreak() }}
-              className="w-16 h-16 rounded-full bg-red-500/80 active:bg-red-500 ring-2 ring-white/40 backdrop-blur-sm flex items-center justify-center text-white text-2xl font-bold"
+              className="w-14 h-14 rounded-full bg-red-500/80 active:bg-red-500 ring-2 ring-white/40 backdrop-blur-sm flex items-center justify-center text-white text-2xl font-bold"
               aria-label="Break block"
             >⛏</button>
             <div className="flex gap-2">
               <button
+                onTouchStart={(e) => { e.preventDefault(); if (gameRef.current) gameRef.current.input.sprint = true }}
+                onTouchEnd={(e) => { e.preventDefault(); if (gameRef.current) gameRef.current.input.sprint = false }}
+                className="w-12 h-12 rounded-full bg-purple-500/70 active:bg-purple-500 ring-2 ring-white/40 backdrop-blur-sm flex items-center justify-center text-white text-xs font-bold"
+                aria-label="Sprint"
+              >Run</button>
+              <button
                 onTouchStart={(e) => { e.preventDefault(); mobileJumpDown() }}
                 onTouchEnd={(e) => { e.preventDefault(); mobileJumpUp() }}
-                className="w-16 h-16 rounded-full bg-sky-500/80 active:bg-sky-500 ring-2 ring-white/40 backdrop-blur-sm flex items-center justify-center text-white text-xl font-bold"
+                className="w-14 h-14 rounded-full bg-sky-500/80 active:bg-sky-500 ring-2 ring-white/40 backdrop-blur-sm flex items-center justify-center text-white text-xl font-bold"
                 aria-label="Jump"
               >↑</button>
               <button
                 onTouchStart={(e) => { e.preventDefault(); mobilePlace() }}
-                className="w-16 h-16 rounded-full bg-emerald-500/80 active:bg-emerald-500 ring-2 ring-white/40 backdrop-blur-sm flex items-center justify-center text-white text-2xl font-bold"
+                className="w-14 h-14 rounded-full bg-emerald-500/80 active:bg-emerald-500 ring-2 ring-white/40 backdrop-blur-sm flex items-center justify-center text-white text-2xl font-bold"
                 aria-label="Place block"
               >+</button>
             </div>
+            {gameMode === 'creative' && (
+              <button
+                onTouchStart={(e) => { e.preventDefault(); toggleFly() }}
+                className={`w-12 h-12 rounded-full ${flying ? 'bg-yellow-500' : 'bg-white/15'} active:bg-yellow-400 ring-2 ring-white/40 backdrop-blur-sm flex items-center justify-center text-white text-xl`}
+                aria-label="Toggle fly"
+              >✈</button>
+            )}
           </div>
-
-          {/* Look hint */}
           <div className="absolute top-1/2 right-4 -translate-y-1/2 pointer-events-none font-mono text-[10px] text-white/40 text-right">
             drag here<br/>to look
           </div>
@@ -623,50 +962,66 @@ export default function MinecraftGame() {
             <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight mb-1" style={{ fontFamily: 'monospace' }}>
               VOXEL<span className="text-emerald-400">CRAFT</span>
             </h1>
-            <p className="text-white/60 text-xs sm:text-sm mb-5 font-mono">A Minecraft-style sandbox — build, mine, explore.</p>
+            <p className="text-white/60 text-xs sm:text-sm mb-5 font-mono">Build · mine · explore · survive</p>
+            <div className="flex flex-col gap-2 mb-5">
+              <button
+                onClick={() => startGame('survival')}
+                className="px-8 py-3 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-lg transition-colors shadow-lg shadow-emerald-500/30"
+              >
+                New Survival Game
+              </button>
+              <button
+                onClick={() => startGame('creative')}
+                className="px-8 py-2.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-black font-bold transition-colors"
+              >
+                New Creative Game
+              </button>
+              {hasSave && (
+                <button
+                  onClick={continueFromSave}
+                  className="px-8 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-bold transition-colors"
+                >
+                  Continue Saved Game
+                </button>
+              )}
+            </div>
             {isMobile ? (
-              <div className="grid grid-cols-2 gap-2 text-left text-xs text-white/80 font-mono mb-5">
+              <div className="grid grid-cols-2 gap-2 text-left text-xs text-white/80 font-mono mb-3">
                 <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">D-pad</span> — Move</div>
                 <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Drag right</span> — Look</div>
-                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">↑ button</span> — Jump</div>
-                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">⛏ button</span> — Mine</div>
-                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">+ button</span> — Place</div>
-                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Tap slot</span> — Pick block</div>
+                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">↑</span> — Jump</div>
+                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">⛏</span> — Mine/Attack</div>
+                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">+</span> — Place</div>
+                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Run</span> — Sprint</div>
               </div>
             ) : (
-              <div className="grid grid-cols-2 gap-2 sm:gap-3 text-left text-xs sm:text-sm text-white/80 font-mono mb-5">
+              <div className="grid grid-cols-2 gap-2 sm:gap-3 text-left text-xs sm:text-sm text-white/80 font-mono mb-3">
                 <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">WASD</span> — Move</div>
                 <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Mouse</span> — Look</div>
-                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Space</span> — Jump / Swim</div>
-                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Shift</span> — Sprint</div>
-                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">L-Click</span> — Mine block</div>
-                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">R-Click</span> — Place block</div>
-                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">1-9</span> — Pick block</div>
-                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Wheel</span> — Cycle hotbar</div>
+                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Space</span> — Jump</div>
+                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Shift</span> — Crouch</div>
+                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Ctrl</span> — Sprint</div>
+                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">F</span> — Toggle mode</div>
+                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">L-Click</span> — Mine/Attack</div>
+                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">R-Click</span> — Place</div>
               </div>
             )}
-            <button
-              onClick={startGame}
-              className="px-8 py-3 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-lg transition-colors shadow-lg shadow-emerald-500/30"
-            >
-              Play
-            </button>
             <p className="text-white/40 text-xs mt-4 font-mono">
-              {isMobile ? 'Tap Play to start · ☰ Menu to pause' : 'Click the canvas to capture your mouse · Esc to pause'}
+              {isMobile ? 'Tap a button to start · World auto-saves' : 'Click a button to start · World auto-saves every 30s'}
             </p>
           </div>
         </div>
       )}
 
       {/* Pause / in-game menu overlay */}
-      {started && paused && (
+      {started && paused && !dead && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
           <div className="max-w-sm w-full p-6 rounded-2xl bg-zinc-900/90 ring-1 ring-white/15 shadow-2xl text-center">
             <h2 className="text-2xl font-bold text-white mb-1 font-mono">
-              {showMenu ? 'Menu' : 'Paused'}
+              {showSettings ? '' : showMenu ? 'Menu' : 'Paused'}
             </h2>
             <p className="text-white/50 text-xs mb-5 font-mono">
-              Position: {position.x} / {position.y} / {position.z}
+              Position: {position.x} / {position.y} / {position.z} · {hh}:{mm}
             </p>
             <div className="flex flex-col gap-2">
               <button
@@ -674,6 +1029,12 @@ export default function MinecraftGame() {
                 className="px-6 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-bold transition-colors"
               >
                 Resume
+              </button>
+              <button
+                onClick={() => setShowSettings(true)}
+                className="px-6 py-2.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-black font-bold transition-colors"
+              >
+                Settings
               </button>
               <button
                 onClick={restartGame}
@@ -688,9 +1049,115 @@ export default function MinecraftGame() {
                 Back to Title
               </button>
             </div>
-            <p className="text-white/40 text-xs mt-4 font-mono">
-              {isMobile ? 'Tap Resume to continue' : 'Click Resume to recapture mouse'}
+          </div>
+        </div>
+      )}
+
+      {/* Death overlay */}
+      {dead && (
+        <div className="absolute inset-0 flex items-center justify-center bg-red-950/80 backdrop-blur-sm p-4">
+          <div className="max-w-sm w-full p-8 rounded-2xl bg-black/80 ring-1 ring-red-500/30 shadow-2xl text-center">
+            <h2 className="text-4xl font-bold text-red-400 mb-2 font-mono">You Died</h2>
+            <p className="text-white/60 text-sm mb-6 font-mono">
+              Final position: {position.x} / {position.y} / {position.z}
             </p>
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={respawn}
+                className="px-6 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-bold transition-colors"
+              >
+                Respawn
+              </button>
+              <button
+                onClick={restartGame}
+                className="px-6 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-bold transition-colors"
+              >
+                New World
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settings modal */}
+      {showSettings && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 z-50">
+          <div className="max-w-md w-full p-6 rounded-2xl bg-zinc-900/95 ring-1 ring-white/15 shadow-2xl">
+            <h2 className="text-2xl font-bold text-white mb-4 font-mono text-center">Settings</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="text-white/80 text-sm font-mono flex justify-between">
+                  <span>Field of View</span>
+                  <span className="text-emerald-300">{settings.fov}°</span>
+                </label>
+                <input
+                  type="range" min={50} max={110} value={settings.fov}
+                  onChange={(e) => saveSettings({ ...settings, fov: parseInt(e.target.value, 10) })}
+                  className="w-full accent-emerald-500"
+                />
+              </div>
+              <div>
+                <label className="text-white/80 text-sm font-mono flex justify-between">
+                  <span>Mouse Sensitivity</span>
+                  <span className="text-emerald-300">{(settings.sensitivity * 1000).toFixed(1)}</span>
+                </label>
+                <input
+                  type="range" min={5} max={50} value={Math.round(settings.sensitivity * 10000)}
+                  onChange={(e) => saveSettings({ ...settings, sensitivity: parseInt(e.target.value, 10) / 10000 })}
+                  className="w-full accent-emerald-500"
+                />
+              </div>
+              <div>
+                <label className="text-white/80 text-sm font-mono flex justify-between">
+                  <span>Volume</span>
+                  <span className="text-emerald-300">{Math.round(settings.volume * 100)}%</span>
+                </label>
+                <input
+                  type="range" min={0} max={100} value={Math.round(settings.volume * 100)}
+                  onChange={(e) => saveSettings({ ...settings, volume: parseInt(e.target.value, 10) / 100 })}
+                  className="w-full accent-emerald-500"
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <label className="text-white/80 text-sm font-mono">Sound Enabled</label>
+                <button
+                  onClick={() => saveSettings({ ...settings, soundEnabled: !settings.soundEnabled })}
+                  className={`px-4 py-1.5 rounded-md text-sm font-mono transition-colors ${
+                    settings.soundEnabled ? 'bg-emerald-500 text-black' : 'bg-white/10 text-white'
+                  }`}
+                >
+                  {settings.soundEnabled ? 'ON' : 'OFF'}
+                </button>
+              </div>
+              <div className="flex items-center justify-between">
+                <label className="text-white/80 text-sm font-mono">Post-Processing</label>
+                <button
+                  onClick={() => saveSettings({ ...settings, postProcessing: !settings.postProcessing })}
+                  className={`px-4 py-1.5 rounded-md text-sm font-mono transition-colors ${
+                    settings.postProcessing ? 'bg-emerald-500 text-black' : 'bg-white/10 text-white'
+                  }`}
+                >
+                  {settings.postProcessing ? 'ON' : 'OFF'}
+                </button>
+              </div>
+              <div className="flex items-center justify-between">
+                <label className="text-white/80 text-sm font-mono">Bloom (glow)</label>
+                <button
+                  onClick={() => saveSettings({ ...settings, bloom: !settings.bloom })}
+                  className={`px-4 py-1.5 rounded-md text-sm font-mono transition-colors ${
+                    settings.bloom ? 'bg-emerald-500 text-black' : 'bg-white/10 text-white'
+                  }`}
+                >
+                  {settings.bloom ? 'ON' : 'OFF'}
+                </button>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowSettings(false)}
+              className="mt-6 w-full px-6 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-bold transition-colors"
+            >
+              Close
+            </button>
           </div>
         </div>
       )}
