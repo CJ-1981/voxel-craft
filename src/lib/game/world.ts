@@ -20,9 +20,9 @@ BLOCK_IDS.forEach((t, i) => {
   TYPE_TO_ID.set(t, i)
 })
 
-export const WORLD_SIZE_X = 64
+export const WORLD_SIZE_X = 208
 export const WORLD_SIZE_Y = 48
-export const WORLD_SIZE_Z = 64
+export const WORLD_SIZE_Z = 208
 export const WATER_LEVEL = 12
 
 const CHUNK_SIZE = 16
@@ -110,11 +110,53 @@ export class World {
     this.seed = seed ?? Math.floor(Math.random() * 0x7fffffff)
     this.generate()
 
+    // Lazy meshing: mesh only the spawn-area 3×3 chunks immediately; defer
+    // the rest to the game loop (meshDirtyChunks) to avoid freezing on load.
+    this.dirtyChunks = []
+    const ccx = Math.floor(CHUNKS_X / 2)
+    const ccz = Math.floor(CHUNKS_Z / 2)
     for (let cz = 0; cz < CHUNKS_Z; cz++) {
       for (let cx = 0; cx < CHUNKS_X; cx++) {
-        this.rebuildChunk(scene, cx, cz)
+        const isNearSpawn = Math.abs(cx - ccx) <= 1 && Math.abs(cz - ccz) <= 1
+        if (isNearSpawn) {
+          this.rebuildChunk(scene, cx, cz)
+        } else {
+          this.dirtyChunks.push([cx, cz])
+        }
       }
     }
+    this.dirtyChunks.sort((a, b) => {
+      const da = (a[0] - ccx) ** 2 + (a[1] - ccz) ** 2
+      const db = (b[0] - ccx) ** 2 + (b[1] - ccz) ** 2
+      return da - db
+    })
+  }
+
+  /** Chunks that need (re)meshing, queued as [cx, cz] pairs. */
+  private dirtyChunks: [number, number][] = []
+
+  /** Mesh up to `budget` dirty chunks per frame. */
+  meshDirtyChunks(scene: THREE.Scene, budget: number): number {
+    let count = 0
+    while (this.dirtyChunks.length > 0 && count < budget) {
+      const [cx, cz] = this.dirtyChunks.shift()!
+      this.rebuildChunk(scene, cx, cz)
+      count++
+    }
+    return count
+  }
+
+  get isMeshing(): boolean { return this.dirtyChunks.length > 0 }
+  get meshProgress(): number {
+    const total = CHUNKS_X * CHUNKS_Z
+    return (total - this.dirtyChunks.length) / total
+  }
+
+  markChunkDirty(cx: number, cz: number): void {
+    for (const [dx, dz] of this.dirtyChunks) {
+      if (dx === cx && dz === cz) return
+    }
+    this.dirtyChunks.push([cx, cz])
   }
 
   // ----- Block access -----
@@ -225,14 +267,25 @@ export class World {
         return null
       }
       this.data.set(bytes)
-      // Biomes can't be reliably reconstructed from saved data alone, so
-      // recompute them deterministically from the same seed.
       this.computeBiomes()
+      // Lazy meshing on load too.
+      this.dirtyChunks = []
+      const ccx = Math.floor(CHUNKS_X / 2)
+      const ccz = Math.floor(CHUNKS_Z / 2)
       for (let cz = 0; cz < CHUNKS_Z; cz++) {
         for (let cx = 0; cx < CHUNKS_X; cx++) {
-          this.rebuildChunk(scene, cx, cz)
+          if (Math.abs(cx - ccx) <= 1 && Math.abs(cz - ccz) <= 1) {
+            this.rebuildChunk(scene, cx, cz)
+          } else {
+            this.dirtyChunks.push([cx, cz])
+          }
         }
       }
+      this.dirtyChunks.sort((a, b) => {
+        const da = (a[0] - ccx) ** 2 + (a[1] - ccz) ** 2
+        const db = (b[0] - ccx) ** 2 + (b[1] - ccz) ** 2
+        return da - db
+      })
       return { meta }
     } catch (e) {
       console.warn('World load failed:', e)

@@ -11,6 +11,7 @@ import { MobManager } from '@/lib/game/mobs'
 import { SoundSystem } from '@/lib/game/sound'
 import { PostProcessing } from '@/lib/game/postprocessing'
 import { BreakParticles } from '@/lib/game/particles'
+import { buildSeoulCity } from '@/lib/game/seoul'
 
 interface GameHandle {
   world: World
@@ -78,6 +79,7 @@ export default function MinecraftGame() {
   const [fps, setFps] = useState(0)
   const [position, setPosition] = useState({ x: 0, y: 0, z: 0 })
   const [hudReady, setHudReady] = useState(false)
+  const [meshProgress, setMeshProgress] = useState(1)
   const [isMobile, setIsMobile] = useState(false)
   const [worldSeed, setWorldSeed] = useState(0)
   const [hasSave, setHasSave] = useState(false)
@@ -139,10 +141,10 @@ export default function MinecraftGame() {
 
     const scene = new THREE.Scene()
     scene.background = new THREE.Color(0x8fc4ff)
-    scene.fog = new THREE.Fog(0x8fc4ff, 40, 80)
+    scene.fog = new THREE.Fog(0x8fc4ff, 60, 140)
 
     const s = settingsRef.current
-    const camera = new THREE.PerspectiveCamera(s.fov, window.innerWidth / window.innerHeight, 0.1, 500)
+    const camera = new THREE.PerspectiveCamera(s.fov, window.innerWidth / window.innerHeight, 0.1, 600)
 
     const atlas = buildAtlasTexture()
     // Try to load saved world; if found, use the saved seed.
@@ -151,9 +153,11 @@ export default function MinecraftGame() {
     if (World.hasSave() && meta) {
       const result = world.loadFromSave(scene)
       if (!result) {
-        // Save was invalid — start fresh.
         World.clearSave()
       }
+    } else {
+      // Fresh world — build Seoul landmarks city.
+      buildSeoulCity(world, scene)
     }
 
     // Spawn player — either from save or world center.
@@ -290,6 +294,12 @@ export default function MinecraftGame() {
         selectionMesh.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5)
       } else {
         selectionMesh.visible = false
+      }
+
+      // Gradually mesh dirty chunks (a few per frame).
+      if (world.isMeshing) {
+        world.meshDirtyChunks(scene, 3)
+        setMeshProgress(world.meshProgress)
       }
 
       // Render via post-processing composer (which includes the scene render
@@ -969,6 +979,19 @@ export default function MinecraftGame() {
             drag here<br/>to look
           </div>
         </>
+      )}
+
+      {/* World loading overlay */}
+      {started && meshProgress < 1 && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm z-30 pointer-events-none">
+          <div className="text-center">
+            <div className="text-white font-mono text-lg mb-3">Building Seoul…</div>
+            <div className="w-64 h-2 bg-zinc-700 rounded-full overflow-hidden">
+              <div className="h-full bg-emerald-500 rounded-full transition-all" style={{ width: `${Math.round(meshProgress * 100)}%` }} />
+            </div>
+            <div className="text-white/60 font-mono text-xs mt-2">{Math.round(meshProgress * 100)}%</div>
+          </div>
+        </div>
       )}
 
       {/* Start overlay */}

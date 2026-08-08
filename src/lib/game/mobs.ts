@@ -2,7 +2,7 @@
 // Mobs have simple AABB physics, basic AI, and model meshes built from boxes.
 
 import * as THREE from 'three'
-import { World } from './world'
+import { World, WORLD_SIZE_X, WORLD_SIZE_Z } from './world'
 import { isSolid } from './blocks'
 import { Player } from './player'
 import type { BreakParticles } from './particles'
@@ -314,7 +314,7 @@ export class MobManager {
         const dist = 8 + Math.random() * 8
         const sx = Math.floor(player.position.x + Math.cos(angle) * dist)
         const sz = Math.floor(player.position.z + Math.sin(angle) * dist)
-        if (sx >= 0 && sx < 64 && sz >= 0 && sz < 64) {
+        if (sx >= 0 && sx < WORLD_SIZE_X && sz >= 0 && sz < WORLD_SIZE_Z) {
           const surfY = world.highestBlockY(sx, sz)
           if (surfY > 0) {
             const type: MobType = isNight ? (Math.random() < 0.7 ? 'zombie' : 'sheep') : 'sheep'
