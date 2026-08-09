@@ -12,6 +12,9 @@ import { SoundSystem } from '@/lib/game/sound'
 import { PostProcessing } from '@/lib/game/postprocessing'
 import { BreakParticles } from '@/lib/game/particles'
 import { buildSeoulCity } from '@/lib/game/seoul'
+import { Inventory, MAIN_SIZE, HOTBAR_SIZE } from '@/lib/game/inventory'
+import { ITEMS, blockDropItem } from '@/lib/game/items'
+import { InventoryUI } from '@/components/game/InventoryUI'
 
 interface GameHandle {
   world: World
@@ -26,6 +29,7 @@ interface GameHandle {
   sound: SoundSystem
   post: PostProcessing
   particles: BreakParticles
+  inventory: Inventory
   dispose: () => void
 }
 
@@ -66,15 +70,22 @@ export default function MinecraftGame() {
   const selectedSlotRef = useRef(0)
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS)
   const playingRef = useRef(false)
+  // Mirror of showInventory state for use in event handlers (which capture
+  // stale closures). The keyboard handler reads this ref instead of the state.
+  const showInventoryRef = useRef(false)
   // For double-tap-to-fly detection.
   const lastJumpTapRef = useRef(0)
   // Footstep audio accumulator.
   const stepDistRef = useRef(0)
+  // Persistent inventory — survives world restarts.
+  const inventoryRef = useRef<Inventory>(new Inventory())
 
   const [started, setStarted] = useState(false)
   const [paused, setPaused] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showInventory, setShowInventory] = useState(false)
+  const [invVersion, setInvVersion] = useState(0)
   const [selectedSlot, setSelectedSlot] = useState(0)
   const [fps, setFps] = useState(0)
   const [position, setPosition] = useState({ x: 0, y: 0, z: 0 })
@@ -199,7 +210,7 @@ export default function MinecraftGame() {
 
     gameRef.current = {
       world, player, scene, camera, renderer, input, selectionMesh,
-      dayNight, mobs, sound, post, particles,
+      dayNight, mobs, sound, post, particles, inventory: inventoryRef.current,
       dispose: () => {
         renderer.dispose()
         atlas.dispose()
@@ -429,9 +440,13 @@ export default function MinecraftGame() {
           if (pd < 5) player.takeDamage(Math.floor(15 - pd * 2), 'tnt')
           return
         }
+        // Break the block + drop its item into the inventory.
+        const drop = blockDropItem(b)
+        if (drop) inventory.addItem(drop, 1)
         g.world.setBlockAndUpdate(g.scene, hit.x, hit.y, hit.z, 'air')
         particles.spawn(b, hit.x, hit.y, hit.z, 14)
         sound.blockBreak()
+        setInvVersion(v => v + 1)
         // Vibrate on mobile.
         if (navigator.vibrate) navigator.vibrate(15)
       } else if (e.button === 2) {
@@ -442,9 +457,14 @@ export default function MinecraftGame() {
         const pz = hit.z + hit.nz
         if (g.world.getBlock(px, py, pz) !== 'air') return
         if (Player.blockOverlapsPlayer(player.position.x, player.position.y, player.position.z, px, py, pz)) return
-        const type = HOTBAR_BLOCKS[selectedSlotRef.current]
-        g.world.setBlockAndUpdate(g.scene, px, py, pz, type)
+        // Place the selected hotbar block (consume from inventory).
+        const held = inventory.getSelectedItem()
+        if (!held) return
+        const blockType = ITEMS[held.item].blockType
+        g.world.setBlockAndUpdate(g.scene, px, py, pz, blockType)
+        inventory.removeOneFromSelected()
         sound.blockPlace()
+        setInvVersion(v => v + 1)
         if (navigator.vibrate) navigator.vibrate(10)
       }
     }
@@ -457,13 +477,45 @@ export default function MinecraftGame() {
       const c = e.code
       const k = e.key.toLowerCase()
       if (c === 'Escape' || k === 'escape') {
-        if (playingRef.current) {
+        if (showInventoryRef.current) {
+          // Close inventory first.
+          setShowInventory(false)
+          showInventoryRef.current = false
+          setFurnaceOpen(false)
+          setCraftingTableOpen(false)
+          playingRef.current = true
+          setPaused(false)
+          if (supportsPointerLock() && !isMobile) canvasRef.current?.requestPointerLock?.()
+        } else if (playingRef.current) {
           playingRef.current = false
           setPaused(true)
           setShowMenu(true)
           if (supportsPointerLock() && document.pointerLockElement === canvas) {
             document.exitPointerLock()
           }
+        }
+        return
+      }
+      // E: open/close inventory (works while playing OR while inventory is open).
+      if (c === 'KeyE' || k === 'e') {
+        if (playingRef.current) {
+          setShowInventory(true)
+          showInventoryRef.current = true
+          setFurnaceOpen(false)
+          setCraftingTableOpen(false)
+          playingRef.current = false
+          setPaused(true)
+          if (supportsPointerLock() && document.pointerLockElement === canvas) {
+            document.exitPointerLock()
+          }
+        } else if (showInventoryRef.current) {
+          setShowInventory(false)
+          showInventoryRef.current = false
+          setFurnaceOpen(false)
+          setCraftingTableOpen(false)
+          playingRef.current = true
+          setPaused(false)
+          if (supportsPointerLock() && !isMobile) canvasRef.current?.requestPointerLock?.()
         }
         return
       }
@@ -530,14 +582,32 @@ export default function MinecraftGame() {
     canvas.addEventListener('contextmenu', onContext)
 
     // ----- Mobile touch look -----
+    // Look-drag works on most of the screen, EXCEPT the bottom-left D-pad
+    // zone and bottom-right action-button zone where the mobile controls live.
     let touchLookId: number | null = null
     let touchLastX = 0
     let touchLastY = 0
+    const isInControlZone = (x: number, y: number): boolean => {
+      const w = window.innerWidth
+      const h = window.innerHeight
+      // Bottom-left D-pad: 0..180px wide, bottom 200px tall.
+      if (x < 180 && y > h - 200) return true
+      // Bottom-right action buttons: right 240px, bottom 200px tall.
+      if (x > w - 240 && y > h - 200) return true
+      // Top-left HUD: 220px wide, 100px tall.
+      if (x < 220 && y < 100) return true
+      // Top-right buttons: 200px wide, 60px tall.
+      if (x > w - 200 && y < 60) return true
+      // Bottom hotbar: center, 80px tall.
+      if (y > h - 80) return true
+      return false
+    }
     const onTouchStart = (e: TouchEvent) => {
       if (!playingRef.current) return
       for (let i = 0; i < e.changedTouches.length; i++) {
         const t = e.changedTouches[i]
-        if (t.clientX > window.innerWidth * 0.5 && touchLookId === null) {
+        // Accept look-drag anywhere that's NOT a control zone.
+        if (!isInControlZone(t.clientX, t.clientY) && touchLookId === null) {
           touchLookId = t.identifier
           touchLastX = t.clientX
           touchLastY = t.clientY
@@ -624,9 +694,13 @@ export default function MinecraftGame() {
       g.sound.explosion()
       return
     }
+    // Drop item + break block.
+    const drop = blockDropItem(b)
+    if (drop) g.inventory.addItem(drop, 1)
     g.world.setBlockAndUpdate(g.scene, hit.x, hit.y, hit.z, 'air')
     g.particles.spawn(b, hit.x, hit.y, hit.z, 14)
     g.sound.blockBreak()
+    setInvVersion(v => v + 1)
     if (navigator.vibrate) navigator.vibrate(15)
   }, [])
 
@@ -642,8 +716,12 @@ export default function MinecraftGame() {
     const px = hit.x + hit.nx, py = hit.y + hit.ny, pz = hit.z + hit.nz
     if (g.world.getBlock(px, py, pz) !== 'air') return
     if (Player.blockOverlapsPlayer(g.player.position.x, g.player.position.y, g.player.position.z, px, py, pz)) return
-    g.world.setBlockAndUpdate(g.scene, px, py, pz, HOTBAR_BLOCKS[selectedSlotRef.current])
+    const held = g.inventory.getSelectedItem()
+    if (!held) return
+    g.world.setBlockAndUpdate(g.scene, px, py, pz, ITEMS[held.item].blockType)
+    g.inventory.removeOneFromSelected()
     g.sound.blockPlace()
+    setInvVersion(v => v + 1)
     if (navigator.vibrate) navigator.vibrate(10)
   }, [])
 
@@ -661,6 +739,11 @@ export default function MinecraftGame() {
       gameRef.current.player.gameMode = mode
       if (mode === 'creative') gameRef.current.player.flying = false
     }
+    // Give starter kit.
+    const inv = inventoryRef.current
+    inv.clear()
+    inv.giveStarterKit()
+    setInvVersion(v => v + 1)
     setStarted(true)
     setPaused(false)
     setShowMenu(false)
@@ -847,6 +930,7 @@ export default function MinecraftGame() {
               <div>L-click — break/attack · R-click — place</div>
               <div>1-9 / wheel — select block</div>
               <div>Esc — pause</div>
+              <div>E — inventory</div>
             </div>
           )}
         </div>
@@ -881,30 +965,42 @@ export default function MinecraftGame() {
         </div>
       )}
 
-      {/* Hotbar */}
+      {/* Hotbar — backed by inventory (last 12 slots) */}
       {hudReady && (
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-1 p-1.5 bg-black/40 backdrop-blur-sm rounded-md ring-1 ring-white/10 max-w-[95vw] overflow-x-auto">
-          {HOTBAR_BLOCKS.map((type, i) => (
-            <button
-              key={type}
-              onClick={() => selectSlot(i)}
-              className={`relative flex-shrink-0 w-9 h-9 sm:w-11 sm:h-11 rounded-sm border-2 transition-colors ${
-                i === selectedSlot ? 'border-white bg-white/15' : 'border-white/20 bg-black/30 hover:border-white/50'
-              }`}
-              title={BLOCKS[type].name}
-            >
-              <img
-                src={tileDataUrl(BLOCKS[type].tiles[0])}
-                alt={BLOCKS[type].name}
-                className="w-full h-full object-cover pixelated"
-                style={{ imageRendering: 'pixelated' }}
-                draggable={false}
-              />
-              <span className="absolute bottom-0 right-0.5 text-[10px] font-mono text-white/80 drop-shadow-[0_1px_1px_rgba(0,0,0,1)]">
-                {i + 1 <= 9 ? i + 1 : ''}
-              </span>
-            </button>
-          ))}
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-1 p-1.5 bg-black/40 backdrop-blur-sm rounded-md ring-1 ring-white/10 max-w-[95vw] overflow-x-auto" key={invVersion}>
+          {Array.from({ length: HOTBAR_SIZE }).map((_, i) => {
+            const slot = inventoryRef.current.slots[MAIN_SIZE + i]
+            return (
+              <button
+                key={i}
+                onClick={() => selectSlot(i)}
+                className={`relative flex-shrink-0 w-9 h-9 sm:w-11 sm:h-11 rounded-sm border-2 transition-colors ${
+                  i === selectedSlot ? 'border-white bg-white/15' : 'border-white/20 bg-black/30 hover:border-white/50'
+                }`}
+                title={slot ? ITEMS[slot.item].name : 'Empty'}
+              >
+                {slot && (
+                  <>
+                    <img
+                      src={tileDataUrl(ITEMS[slot.item].iconTile)}
+                      alt={ITEMS[slot.item].name}
+                      className="w-full h-full object-cover pixelated"
+                      style={{ imageRendering: 'pixelated' }}
+                      draggable={false}
+                    />
+                    {slot.count > 1 && (
+                      <span className="absolute bottom-0 right-0.5 text-[10px] font-mono text-white/80 drop-shadow-[0_1px_1px_rgba(0,0,0,1)]">
+                        {slot.count}
+                      </span>
+                    )}
+                  </>
+                )}
+                <span className="absolute top-0 left-0.5 text-[9px] font-mono text-white/40">
+                  {i + 1 <= 9 ? i + 1 : ''}
+                </span>
+              </button>
+            )
+          })}
         </div>
       )}
 
@@ -975,8 +1071,8 @@ export default function MinecraftGame() {
               >✈</button>
             )}
           </div>
-          <div className="absolute top-1/2 right-4 -translate-y-1/2 pointer-events-none font-mono text-[10px] text-white/40 text-right">
-            drag here<br/>to look
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-16 pointer-events-none font-mono text-[10px] text-white/30 text-center">
+            drag anywhere to look
           </div>
         </>
       )}
@@ -1116,6 +1212,22 @@ export default function MinecraftGame() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Inventory UI */}
+      {showInventory && hudReady && (
+        <InventoryUI
+          inventory={inventoryRef.current}
+          onClose={() => {
+            setShowInventory(false)
+            showInventoryRef.current = false
+            playingRef.current = true
+            setPaused(false)
+            if (supportsPointerLock() && !isMobile) canvasRef.current?.requestPointerLock?.()
+            setInvVersion(v => v + 1)
+          }}
+          onChange={() => setInvVersion(v => v + 1)}
+        />
       )}
 
       {/* Settings modal */}
