@@ -1163,6 +1163,9 @@ export default function MinecraftGame() {
                     setSelectedMap('seoul')
                     selectedMapRef.current = 'seoul'
                     try { localStorage.setItem('voxelcraft_selected_map', 'seoul') } catch {}
+                    World.clearSave()
+                    setHasSave(false)
+                    setWorldSeed(s => s + 1)
                   }}
                   className={`py-2 px-2 rounded-lg text-xs font-mono font-bold transition-all ${
                     selectedMap === 'seoul'
@@ -1177,6 +1180,9 @@ export default function MinecraftGame() {
                     setSelectedMap('tokyo')
                     selectedMapRef.current = 'tokyo'
                     try { localStorage.setItem('voxelcraft_selected_map', 'tokyo') } catch {}
+                    World.clearSave()
+                    setHasSave(false)
+                    setWorldSeed(s => s + 1)
                   }}
                   className={`py-2 px-2 rounded-lg text-xs font-mono font-bold transition-all ${
                     selectedMap === 'tokyo'
@@ -1191,6 +1197,9 @@ export default function MinecraftGame() {
                     setSelectedMap('wilderness')
                     selectedMapRef.current = 'wilderness'
                     try { localStorage.setItem('voxelcraft_selected_map', 'wilderness') } catch {}
+                    World.clearSave()
+                    setHasSave(false)
+                    setWorldSeed(s => s + 1)
                   }}
                   className={`py-2 px-2 rounded-lg text-xs font-mono font-bold transition-all ${
                     selectedMap === 'wilderness'
