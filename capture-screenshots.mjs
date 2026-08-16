@@ -13,7 +13,6 @@ async function capture() {
   const url = 'http://localhost:3000/voxel-craft';
 
   try {
-    // Desktop context
     const desktopContext = await browser.newContext({
       viewport: { width: 1440, height: 810 },
       deviceScaleFactor: 1.5,
@@ -21,7 +20,6 @@ async function capture() {
 
     const page = await desktopContext.newPage();
 
-    // Helper to hide Next.js dev toast/watermark
     const injectStyles = async (p) => {
       await p.addStyleTag({
         content: `
@@ -34,7 +32,6 @@ async function capture() {
       });
     };
 
-    // Helper to wait until world meshing is 100% complete
     const waitForWorldReady = async (p) => {
       await p.waitForFunction(() => {
         const g = window.__game;
@@ -45,12 +42,12 @@ async function capture() {
 
     // 1. Start Screen
     console.log('1/8: Capturing start-screen.png...');
-    await page.goto(url, { waitUntil: 'networkidle' });
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
     await injectStyles(page);
     await page.waitForTimeout(1500);
     await page.screenshot({ path: `${SCREENSHOTS_DIR}/start-screen.png` });
 
-    // 2. Gameplay (Survival Mode, Daylight)
+    // 2. Gameplay (Seoul)
     console.log('2/8: Capturing gameplay.png...');
     const survivalBtn = page.locator('button:has-text("New Survival Game")');
     await survivalBtn.waitFor({ state: 'visible', timeout: 10000 });
@@ -61,40 +58,90 @@ async function capture() {
     await page.evaluate(() => {
       const g = window.__game;
       if (g) {
-        const world = g.world;
-        const getTop = (x, z) => {
-          for (let y = 47; y >= 0; y--) {
-            const b = world.getBlock(x, y, z);
-            if (b && b !== 'air' && b !== 'water' && b !== 'leaves') return y;
-          }
-          return 15;
-        };
-
-        let bestX = 104, bestZ = 104, maxY = 0;
-        for (let x = 70; x < 140; x += 3) {
-          for (let z = 70; z < 140; z += 3) {
-            const h = getTop(x, z);
-            if (h > maxY && h < 32) {
-              maxY = h;
-              bestX = x;
-              bestZ = z;
-            }
-          }
-        }
-
-        g.player.position.set(bestX + 0.5, maxY + 2.6, bestZ + 0.5);
+        g.player.position.set(104.5, 26, 104.5);
         g.player.yaw = 2.1;
         g.player.pitch = -0.15;
-        g.dayNight.timeOfDay = 0.42; // Clear sunny day
+        g.dayNight.timeOfDay = 0.42;
         g.dayNight.paused = true;
-        g.selectedHotbarIndex = 0;
       }
     });
     await page.waitForTimeout(1500);
     await page.screenshot({ path: `${SCREENSHOTS_DIR}/gameplay.png` });
 
-    // 3. Inventory
-    console.log('3/8: Capturing inventory.png...');
+    // 3. Chest UI
+    console.log('3/8: Capturing chest.png...');
+    await page.evaluate(() => {
+      const g = window.__game;
+      if (g) {
+        // Place chest 2 blocks in front of player
+        const forward = { x: -Math.sin(g.player.yaw), z: -Math.cos(g.player.yaw) };
+        const px = Math.floor(g.player.position.x + forward.x * 2);
+        const py = Math.floor(g.player.position.y);
+        const pz = Math.floor(g.player.position.z + forward.z * 2);
+        g.world.setBlockAndUpdate(g.scene, px, py, pz, 'chest');
+        
+        const canvas = document.querySelector('canvas');
+        if (canvas) {
+          canvas.dispatchEvent(new MouseEvent('mousedown', { button: 2, bubbles: true }));
+        }
+      }
+    });
+    await page.waitForTimeout(800);
+    await injectStyles(page);
+    await page.screenshot({ path: `${SCREENSHOTS_DIR}/chest.png` });
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(500);
+
+    // 4. Tokyo Megacity Map Panorama
+    console.log('4/8: Capturing tokyo.png...');
+    const pageTokyo = await desktopContext.newPage();
+    await pageTokyo.goto(url, { waitUntil: 'domcontentloaded' });
+    await injectStyles(pageTokyo);
+    await pageTokyo.waitForTimeout(1000);
+
+    // Select Tokyo map
+    const tokyoMapBtn = pageTokyo.locator('button:has-text("Tokyo")');
+    await tokyoMapBtn.click();
+    await pageTokyo.waitForTimeout(300);
+
+    const creativeBtn = pageTokyo.locator('button:has-text("New Creative Game")');
+    await creativeBtn.click();
+    await waitForWorldReady(pageTokyo);
+    await injectStyles(pageTokyo);
+
+    await pageTokyo.evaluate(() => {
+      const g = window.__game;
+      if (g) {
+        g.dayNight.timeOfDay = 0.72; // Golden sunset
+        g.dayNight.paused = true;
+        g.player.flying = true;
+        g.player.position.set(104, 38, 104);
+        g.player.yaw = 0.8;
+        g.player.pitch = -0.32;
+      }
+    });
+    await pageTokyo.waitForTimeout(2000);
+    await pageTokyo.screenshot({ path: `${SCREENSHOTS_DIR}/tokyo.png` });
+
+    // 5. Night Scene
+    console.log('5/8: Capturing night.png...');
+    await pageTokyo.evaluate(() => {
+      const g = window.__game;
+      if (g) {
+        g.dayNight.timeOfDay = 0.03; // Starfield and moon
+        g.dayNight.paused = true;
+        g.player.flying = true;
+        g.player.position.set(104, 24, 104);
+        g.player.pitch = 0.05;
+        g.player.yaw = 2.4;
+      }
+    });
+    await pageTokyo.waitForTimeout(2000);
+    await pageTokyo.screenshot({ path: `${SCREENSHOTS_DIR}/night.png` });
+    await pageTokyo.close();
+
+    // 6. Inventory UI
+    console.log('6/8: Capturing inventory.png...');
     await page.keyboard.press('e');
     await page.waitForTimeout(1000);
     await injectStyles(page);
@@ -102,15 +149,10 @@ async function capture() {
     await page.keyboard.press('Escape');
     await page.waitForTimeout(500);
 
-    // 4. Pause Menu
-    console.log('4/8: Capturing menu.png...');
+    // 7. Settings Modal
+    console.log('7/8: Capturing settings.png...');
     await page.keyboard.press('Escape');
-    await page.waitForTimeout(600);
-    await injectStyles(page);
-    await page.screenshot({ path: `${SCREENSHOTS_DIR}/menu.png` });
-
-    // 5. Settings Modal
-    console.log('5/8: Capturing settings.png...');
+    await page.waitForTimeout(500);
     const settingsBtn = page.locator('div.backdrop-blur-sm button:has-text("Settings")');
     if (await settingsBtn.isVisible()) {
       await settingsBtn.click();
@@ -119,49 +161,6 @@ async function capture() {
       await page.screenshot({ path: `${SCREENSHOTS_DIR}/settings.png` });
     }
 
-    // 6. Creative / Scenic Panorama
-    console.log('6/8: Capturing creative.png...');
-    const pageCreative = await desktopContext.newPage();
-    await pageCreative.goto(url, { waitUntil: 'networkidle' });
-    await injectStyles(pageCreative);
-    await pageCreative.waitForTimeout(1000);
-    const creativeBtn = pageCreative.locator('button:has-text("New Creative Game")');
-    await creativeBtn.waitFor({ state: 'visible', timeout: 10000 });
-    await creativeBtn.click();
-    await waitForWorldReady(pageCreative);
-    await injectStyles(pageCreative);
-
-    await pageCreative.evaluate(() => {
-      const g = window.__game;
-      if (g) {
-        g.dayNight.timeOfDay = 0.72; // Golden hour / sunset
-        g.dayNight.paused = true;
-        g.player.flying = true;
-        g.player.position.set(104, 38, 104);
-        g.player.yaw = 0.8;
-        g.player.pitch = -0.32;
-      }
-    });
-    await pageCreative.waitForTimeout(2000);
-    await pageCreative.screenshot({ path: `${SCREENSHOTS_DIR}/creative.png` });
-
-    // 7. Night Scene
-    console.log('7/8: Capturing night.png...');
-    await pageCreative.evaluate(() => {
-      const g = window.__game;
-      if (g) {
-        g.dayNight.timeOfDay = 0.03; // Night with stars & moon
-        g.dayNight.paused = true;
-        g.player.flying = true;
-        g.player.position.set(104, 24, 104);
-        g.player.pitch = 0.05; // look towards moon and horizon
-        g.player.yaw = 2.4;
-      }
-    });
-    await pageCreative.waitForTimeout(2000);
-    await pageCreative.screenshot({ path: `${SCREENSHOTS_DIR}/night.png` });
-
-    await pageCreative.close();
     await page.close();
     await desktopContext.close();
 
@@ -174,7 +173,7 @@ async function capture() {
       deviceScaleFactor: 2,
     });
     const mobilePage = await mobileContext.newPage();
-    await mobilePage.goto(url, { waitUntil: 'networkidle' });
+    await mobilePage.goto(url, { waitUntil: 'domcontentloaded' });
     await injectStyles(mobilePage);
     await mobilePage.waitForTimeout(1500);
     const mobilePlay = mobilePage.locator('button:has-text("New Survival Game")');
@@ -188,28 +187,7 @@ async function capture() {
       if (g) {
         g.dayNight.timeOfDay = 0.45;
         g.dayNight.paused = true;
-        const world = g.world;
-        const getTop = (x, z) => {
-          for (let y = 47; y >= 0; y--) {
-            const b = world.getBlock(x, y, z);
-            if (b && b !== 'air' && b !== 'water' && b !== 'leaves') return y;
-          }
-          return 15;
-        };
-
-        let bestX = 104, bestZ = 104, maxY = 0;
-        for (let x = 80; x < 130; x += 4) {
-          for (let z = 80; z < 130; z += 4) {
-            const h = getTop(x, z);
-            if (h > maxY && h < 32) {
-              maxY = h;
-              bestX = x;
-              bestZ = z;
-            }
-          }
-        }
-
-        g.player.position.set(bestX + 0.5, maxY + 2.6, bestZ + 0.5);
+        g.player.position.set(104.5, 26, 104.5);
         g.player.yaw = 2.1;
         g.player.pitch = -0.15;
       }

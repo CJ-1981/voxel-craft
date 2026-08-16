@@ -10,7 +10,7 @@ export default defineConfig({
   use: {
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
-    baseURL: 'http://localhost:3000',
+    baseURL: 'http://localhost:3000/voxel-craft',
   },
   projects: [
     {
@@ -20,7 +20,7 @@ export default defineConfig({
   ],
   webServer: {
     command: 'npm run dev',
-    url: 'http://localhost:3000',
+    url: 'http://localhost:3000/voxel-craft',
     timeout: 120000,
     reuseExistingServer: !process.env.CI,
   },

@@ -4,6 +4,8 @@ import * as THREE from 'three'
 import { createNoise2D, createNoise3D } from 'simplex-noise'
 import { BLOCKS, BlockType, isTransparent } from './blocks'
 import { tileUV, ATLAS_COLS, ATLAS_ROWS, TILE_SIZE } from './textures'
+import { buildDungeon, buildDesertPyramid, buildLavaLake } from './structures'
+import type { Slot } from './inventory'
 
 // Block integer IDs (stored in the world array for performance).
 // IMPORTANT: append new block types at the end so saved worlds stay compatible.
@@ -12,6 +14,9 @@ const BLOCK_IDS: BlockType[] = [
   'planks', 'cobblestone', 'bedrock', 'glass', 'brick', 'gold', 'diamond',
   'snow', 'ice', 'cactus', 'flower_red', 'flower_yellow', 'coal_ore', 'iron_ore',
   'stairs', 'slab', 'fence', 'door', 'ladder', 'tnt', 'glowstone',
+  // New in v1.2: structures & Tokyo blocks
+  'lava', 'obsidian', 'sandstone', 'chest', 'spawner', 'mossy_cobblestone',
+  'cherry_leaves', 'cherry_wood', 'red_wool', 'lantern'
 ]
 const ID_TO_TYPE = new Map<number, BlockType>()
 const TYPE_TO_ID = new Map<BlockType, number>()
@@ -57,6 +62,7 @@ const BIOMES: Record<BiomeType, BiomeDef> = {
 
 const SAVE_KEY = 'voxelcraft_world_v1'
 const SAVE_META_KEY = 'voxelcraft_meta_v1'
+const SAVE_CHESTS_KEY = 'voxelcraft_chests_v1'
 
 export interface WorldSaveMeta {
   seed: number
@@ -79,6 +85,9 @@ export class World {
   private cutoutMaterial: THREE.Material
   private translucentMaterial: THREE.Material
   readonly seed: number
+
+  /** Storage for chest inventories keyed by `${x},${y},${z}`. */
+  private chests: Map<string, Slot[]> = new Map()
 
   constructor(scene: THREE.Scene, atlasTexture: THREE.Texture, seed?: number) {
     this.data = new Uint8Array(WORLD_SIZE_X * WORLD_SIZE_Y * WORLD_SIZE_Z)
@@ -187,7 +196,34 @@ export class World {
   }
 
   setBlockAndUpdate(scene: THREE.Scene, x: number, y: number, z: number, type: BlockType): void {
-    if (!this.setBlock(x, y, z, type)) return
+    let finalType = type
+
+    // Fluid interaction: Water + Lava
+    if (type === 'lava') {
+      const neighbors = [
+        [x+1,y,z], [x-1,y,z], [x,y+1,z], [x,y-1,z], [x,y,z+1], [x,y,z-1]
+      ]
+      for (const [nx, ny, nz] of neighbors) {
+        if (this.getBlock(nx, ny, nz) === 'water') {
+          finalType = 'obsidian'
+          break
+        }
+      }
+    } else if (type === 'water') {
+      const neighbors = [
+        [x+1,y,z], [x-1,y,z], [x,y+1,z], [x,y-1,z], [x,y,z+1], [x,y,z-1]
+      ]
+      for (const [nx, ny, nz] of neighbors) {
+        if (this.getBlock(nx, ny, nz) === 'lava') {
+          this.setBlock(nx, ny, nz, 'obsidian')
+          const cx = Math.floor(nx / CHUNK_SIZE)
+          const cz = Math.floor(nz / CHUNK_SIZE)
+          this.markChunkDirty(cx, cz)
+        }
+      }
+    }
+
+    if (!this.setBlock(x, y, z, finalType)) return
     const cx = Math.floor(x / CHUNK_SIZE)
     const cz = Math.floor(z / CHUNK_SIZE)
     this.rebuildChunk(scene, cx, cz)
@@ -197,6 +233,16 @@ export class World {
     if (lx === CHUNK_SIZE - 1 && cx < CHUNKS_X - 1) this.rebuildChunk(scene, cx + 1, cz)
     if (lz === 0 && cz > 0) this.rebuildChunk(scene, cx, cz - 1)
     if (lz === CHUNK_SIZE - 1 && cz < CHUNKS_Z - 1) this.rebuildChunk(scene, cx, cz + 1)
+  }
+
+  // ----- Chest Storage -----
+
+  getChestLoot(x: number, y: number, z: number): Slot[] | undefined {
+    return this.chests.get(`${x},${y},${z}`)
+  }
+
+  setChestLoot(x: number, y: number, z: number, slots: Slot[]): void {
+    this.chests.set(`${x},${y},${z}`, slots)
   }
 
   getBiome(x: number, z: number): BiomeType {
@@ -210,8 +256,6 @@ export class World {
   /** Serialize the world to localStorage. Returns true on success. */
   save(player?: { x: number; y: number; z: number; yaw: number; pitch: number }): boolean {
     try {
-      // Use base64 encoding of the raw byte array for compactness.
-      // The data array can be up to ~200KB which fits in localStorage.
       let bin = ''
       const chunk = 0x8000
       for (let i = 0; i < this.data.length; i += chunk) {
@@ -229,6 +273,7 @@ export class World {
         playerPitch: player?.pitch ?? 0,
       }
       localStorage.setItem(SAVE_META_KEY, JSON.stringify(meta))
+      localStorage.setItem(SAVE_CHESTS_KEY, JSON.stringify(Array.from(this.chests.entries())))
       return true
     } catch (e) {
       console.warn('World save failed:', e)
@@ -238,7 +283,7 @@ export class World {
 
   static hasSave(): boolean {
     try {
-      return !!localStorage.getItem(SAVE_KEY) && !!localStorage.getItem(SAVE_META_KEY)
+      return !!localStorage.getItem(SAVE_KEY)
     } catch {
       return false
     }
@@ -247,173 +292,146 @@ export class World {
   static loadMeta(): WorldSaveMeta | null {
     try {
       const raw = localStorage.getItem(SAVE_META_KEY)
-      return raw ? JSON.parse(raw) as WorldSaveMeta : null
+      if (!raw) return null
+      return JSON.parse(raw) as WorldSaveMeta
     } catch {
       return null
     }
   }
 
-  /** Loads block data from localStorage into this world. Rebuilds all chunks. */
-  loadFromSave(scene: THREE.Scene): { meta: WorldSaveMeta } | null {
+  load(scene: THREE.Scene): boolean {
     try {
       const b64 = localStorage.getItem(SAVE_KEY)
-      const meta = World.loadMeta()
-      if (!b64 || !meta) return null
+      if (!b64) return false
       const bin = atob(b64)
-      const bytes = new Uint8Array(bin.length)
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-      if (bytes.length !== this.data.length) {
-        console.warn('Save size mismatch — ignoring save.')
-        return null
+      if (bin.length !== this.data.length) return false
+      for (let i = 0; i < bin.length; i++) {
+        this.data[i] = bin.charCodeAt(i)
       }
-      this.data.set(bytes)
-      this.computeBiomes()
-      // Lazy meshing on load too.
-      this.dirtyChunks = []
-      const ccx = Math.floor(CHUNKS_X / 2)
-      const ccz = Math.floor(CHUNKS_Z / 2)
+      const chestsRaw = localStorage.getItem(SAVE_CHESTS_KEY)
+      if (chestsRaw) {
+        this.chests = new Map(JSON.parse(chestsRaw))
+      }
       for (let cz = 0; cz < CHUNKS_Z; cz++) {
         for (let cx = 0; cx < CHUNKS_X; cx++) {
-          if (Math.abs(cx - ccx) <= 1 && Math.abs(cz - ccz) <= 1) {
-            this.rebuildChunk(scene, cx, cz)
-          } else {
-            this.dirtyChunks.push([cx, cz])
-          }
+          this.rebuildChunk(scene, cx, cz)
         }
       }
-      this.dirtyChunks.sort((a, b) => {
-        const da = (a[0] - ccx) ** 2 + (a[1] - ccz) ** 2
-        const db = (b[0] - ccx) ** 2 + (b[1] - ccz) ** 2
-        return da - db
-      })
-      return { meta }
+      return true
     } catch (e) {
       console.warn('World load failed:', e)
-      return null
+      return false
     }
+  }
+
+  loadFromSave(scene: THREE.Scene): boolean {
+    return this.load(scene)
   }
 
   static clearSave(): void {
     try {
       localStorage.removeItem(SAVE_KEY)
       localStorage.removeItem(SAVE_META_KEY)
-    } catch { /* ignore */ }
-  }
-
-  // ----- Terrain generation -----
-
-  /** Deterministic PRNG (mulberry32) — same seed always produces same world. */
-  private makeRng(seed: number): () => number {
-    let s = seed >>> 0
-    return () => {
-      s = (s + 0x6D2B79F5) >>> 0
-      let t = s
-      t = Math.imul(t ^ (t >>> 15), t | 1)
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+      localStorage.removeItem(SAVE_CHESTS_KEY)
+    } catch (e) {
+      console.warn('Clear save failed:', e)
     }
   }
 
-  private computeBiomes(): void {
-    const rng = this.makeRng(this.seed)
-    const biomeNoise = createNoise2D(this.makeRng(this.seed + 1))
-    const moistureNoise = createNoise2D(this.makeRng(this.seed + 2))
-    const tempNoise = createNoise2D(this.makeRng(this.seed + 3))
-    void rng
-
-    const biomeList: BiomeType[] = ['plains', 'forest', 'desert', 'snow', 'ocean']
-    for (let x = 0; x < WORLD_SIZE_X; x++) {
-      for (let z = 0; z < WORLD_SIZE_Z; z++) {
-        // Use 4-octave noise to create biome regions.
-        const b = biomeNoise(x * 0.025, z * 0.025) // -1..1
-        const m = moistureNoise(x * 0.04, z * 0.04) // -1..1
-        const t = tempNoise(x * 0.03, z * 0.03) // -1..1
-
-        let biome: BiomeType
-        if (b < -0.4) {
-          biome = 'ocean'
-        } else if (t < -0.3) {
-          biome = 'snow'
-        } else if (t > 0.4 && m < 0) {
-          biome = 'desert'
-        } else if (m > 0.2 && b > 0) {
-          biome = 'forest'
-        } else {
-          biome = 'plains'
-        }
-        this.biomes[x + z * WORLD_SIZE_X] = biomeList.indexOf(biome)
-      }
-    }
-  }
+  // ----- Terrain Generation -----
 
   private generate(): void {
-    this.computeBiomes()
-
-    // Use seed-based PRNGs so terrain is deterministic per seed.
-    const heightNoise = createNoise2D(this.makeRng(this.seed + 10))
-    const detailNoise = createNoise2D(this.makeRng(this.seed + 11))
-    const caveNoise = createNoise3D(this.makeRng(this.seed + 12))
-    const caveNoise2 = createNoise3D(this.makeRng(this.seed + 13))
-    const oreNoise = createNoise3D(this.makeRng(this.seed + 14))
-    const scatterRng = this.makeRng(this.seed + 20)
-
-    const heightAt = (x: number, z: number, biome: BiomeDef): number => {
-      const base = biome.type === 'ocean' ? 7 : biome.type === 'desert' ? 14 : 14
-      const amp = biome.type === 'plains' ? 4 : biome.type === 'forest' ? 6 : 8
-      const scale = 0.04
-      const h1 = heightNoise(x * scale, z * scale) * amp
-      const h2 = detailNoise(x * scale * 2.1, z * scale * 2.1) * 2.5
-      let h = Math.max(1, Math.floor(base + h1 + h2))
-      if (biome.type === 'ocean') h = Math.min(h, WATER_LEVEL - 1)
-      return h
+    const s = this.seed
+    const sfc32 = (a: number, b: number, c: number, d: number) => () => {
+      a |= 0; b |= 0; c |= 0; d |= 0
+      const t = (a + b | 0) + d | 0
+      d = d + 1 | 0
+      a = b ^ (b >>> 9)
+      b = c + (c << 3) | 0
+      c = (c << 21 | c >>> 11) + t | 0
+      return (t >>> 0) / 4294967296
     }
+    const rng = sfc32(s, s ^ 0xdeadbeef, s ^ 0x12345678, s ^ 0x87654321)
 
-    // First pass: terrain columns.
+    const terrainNoise1 = createNoise2D(rng)
+    const terrainNoise2 = createNoise2D(rng)
+    const terrainNoise3 = createNoise2D(rng)
+    const biomeNoiseTemp = createNoise2D(rng)
+    const biomeNoiseRain = createNoise2D(rng)
+    const caveNoise = createNoise3D(rng)
+    const caveNoise2 = createNoise3D(rng)
+    const oreNoiseCoal = createNoise3D(rng)
+    const oreNoiseIron = createNoise3D(rng)
+    const oreNoiseGold = createNoise3D(rng)
+    const oreNoiseDia = createNoise3D(rng)
+    const scatterRng = sfc32(s + 1, s ^ 0x55555555, s ^ 0xaaaaaaaa, s ^ 0x33333333)
+
+    // First pass: terrain height & biomes
     for (let x = 0; x < WORLD_SIZE_X; x++) {
       for (let z = 0; z < WORLD_SIZE_Z; z++) {
-        const biome = BIOMES[this.getBiome(x, z)]
-        const h = heightAt(x, z, biome)
+        const temp = biomeNoiseTemp(x * 0.005, z * 0.005)
+        const rain = biomeNoiseRain(x * 0.005, z * 0.005)
+
+        let biomeType: BiomeType
+        if (rain < -0.35) {
+          biomeType = 'desert'
+        } else if (temp < -0.3) {
+          biomeType = 'snow'
+        } else if (rain > 0.3) {
+          biomeType = 'forest'
+        } else if (temp > 0.4 && rain < 0) {
+          biomeType = 'desert'
+        } else {
+          biomeType = 'plains'
+        }
+
+        const biomeId = ['plains', 'forest', 'desert', 'snow', 'ocean'].indexOf(biomeType)
+        this.biomes[x + z * WORLD_SIZE_X] = biomeId
+        const biome = BIOMES[biomeType]
+
+        const n1 = terrainNoise1(x * 0.015, z * 0.015)
+        const n2 = terrainNoise2(x * 0.04, z * 0.04) * 0.4
+        const n3 = terrainNoise3(x * 0.1, z * 0.1) * 0.15
+        const elevation = (n1 + n2 + n3) * 0.5 + 0.5
+
+        let h: number
+        if (biomeType === 'ocean') {
+          h = Math.floor(6 + elevation * 5)
+        } else if (biomeType === 'snow') {
+          h = Math.floor(16 + elevation * 20)
+        } else if (biomeType === 'desert') {
+          h = Math.floor(13 + elevation * 10)
+        } else {
+          h = Math.floor(12 + elevation * 15)
+        }
+        h = Math.max(1, Math.min(WORLD_SIZE_Y - 2, h))
+
         for (let y = 0; y <= h; y++) {
-          let type: BlockType = 'stone'
+          let type: BlockType
           if (y === 0) {
             type = 'bedrock'
           } else if (y === h) {
-            // Surface block
-            if (h < WATER_LEVEL) {
-              type = biome.surface === 'grass' ? 'dirt' : biome.surface // underwater: dirt for grass biomes
-            } else {
-              type = biome.surface
-            }
-            // Snow biome: snow on top, dirt below
-            if (biome.hasSnow && h >= WATER_LEVEL) type = 'snow'
+            type = h < WATER_LEVEL ? 'sand' : biome.surface
           } else if (y >= h - 3) {
-            type = biome.subsurface
-            if (biome.hasSnow && y >= h - 1) type = 'dirt' // dirt under snow
+            type = h < WATER_LEVEL ? 'sand' : biome.subsurface
           } else {
             type = 'stone'
-            // Ore veins via 3D noise thresholding.
-            const oreN = oreNoise(x * 0.1, y * 0.15, z * 0.1)
-            if (y < 4 && oreN > 0.78) type = 'diamond'
-            else if (y < 10 && oreN > 0.7) type = 'gold'
-            else if (y < 20 && oreNoise(x * 0.15, y * 0.2, z * 0.15) > 0.65) type = 'iron_ore'
-            else if (oreNoise(x * 0.2, y * 0.25, z * 0.2) > 0.6) type = 'coal_ore'
+            if (oreNoiseDia(x * 0.15, y * 0.15, z * 0.15) > 0.78 && y < 8) type = 'diamond'
+            else if (oreNoiseGold(x * 0.12, y * 0.12, z * 0.12) > 0.72 && y < 14) type = 'gold'
+            else if (oreNoiseIron(x * 0.1, y * 0.1, z * 0.1) > 0.65 && y < 24) type = 'iron_ore'
+            else if (oreNoiseCoal(x * 0.08, y * 0.08, z * 0.08) > 0.62) type = 'coal_ore'
           }
-          // Carve caves: two overlapping 3D noise fields. Caves only below surface
-          // and above bedrock, and never under oceans (so we don't flood the world).
+
+          // Carve caves
           if (y > 1 && y < h - 1 && biome.type !== 'ocean') {
             const c1 = caveNoise(x * 0.08, y * 0.1, z * 0.08)
             const c2 = caveNoise2(x * 0.05, y * 0.06, z * 0.05)
-            // Tunnels: where both noises are near zero (worm-like).
-            if (Math.abs(c1) < 0.07 && Math.abs(c2) < 0.15) {
-              type = 'air'
-            }
-            // Larger caverns: where one noise exceeds a high threshold.
-            if (c1 > 0.85 && y < h - 4) {
-              type = 'air'
-            }
+            if (Math.abs(c1) < 0.07 && Math.abs(c2) < 0.15) type = 'air'
+            if (c1 > 0.85 && y < h - 4) type = 'air'
           }
           this.setBlock(x, y, z, type)
         }
+
         // Water fill
         if (h < WATER_LEVEL) {
           for (let y = h + 1; y <= WATER_LEVEL; y++) {
@@ -428,7 +446,6 @@ export class World {
       for (let z = 3; z < WORLD_SIZE_Z - 3; z++) {
         const biome = BIOMES[this.getBiome(x, z)]
         const r = scatterRng()
-        // Find surface
         let surfY = -1
         for (let y = WORLD_SIZE_Y - 1; y >= 0; y--) {
           const b = this.getBlock(x, y, z)
@@ -436,19 +453,46 @@ export class World {
           surfY = y
           break
         }
-        if (surfY < 0) continue
-        if (surfY < WATER_LEVEL) continue // Don't plant in water
+        if (surfY < 0 || surfY < WATER_LEVEL) continue
+
         const surfBlock = this.getBlock(x, surfY, z)
         if (r < biome.treeChance && (surfBlock === 'grass' || surfBlock === 'snow')) {
           this.plantTree(x, surfY + 1, z, biome.type === 'snow')
         } else if (r < biome.treeChance + biome.cactusChance && surfBlock === 'sand') {
-          // Cactus: 1-3 blocks tall
           const ch = 1 + Math.floor(scatterRng() * 3)
           for (let i = 1; i <= ch; i++) this.setBlock(x, surfY + i, z, 'cactus')
         } else if (r < biome.treeChance + biome.cactusChance + biome.flowerChance && surfBlock === 'grass') {
           this.setBlock(x, surfY + 1, z, scatterRng() < 0.5 ? 'flower_red' : 'flower_yellow')
         }
       }
+    }
+
+    // Third pass: Natural Structures (Dungeons, Desert Pyramids, Lava Lakes)
+    // 1. Natural Underground Dungeons
+    for (let d = 0; d < 4; d++) {
+      const dx = 25 + Math.floor(scatterRng() * (WORLD_SIZE_X - 50))
+      const dz = 25 + Math.floor(scatterRng() * (WORLD_SIZE_Z - 50))
+      const dy = 5 + Math.floor(scatterRng() * 10) // deep underground
+      buildDungeon(this, dx, dy, dz)
+    }
+
+    // 2. Desert Pyramids
+    let pyramidsBuilt = 0
+    for (let px = 30; px < WORLD_SIZE_X - 30; px += 25) {
+      for (let pz = 30; pz < WORLD_SIZE_Z - 30; pz += 25) {
+        if (this.getBiome(px, pz) === 'desert' && pyramidsBuilt < 2) {
+          buildDesertPyramid(this, px, pz)
+          pyramidsBuilt++
+        }
+      }
+    }
+
+    // 3. Lava Lakes in caves
+    for (let l = 0; l < 4; l++) {
+      const lx = 20 + Math.floor(scatterRng() * (WORLD_SIZE_X - 40))
+      const lz = 20 + Math.floor(scatterRng() * (WORLD_SIZE_Z - 40))
+      const ly = 4 + Math.floor(scatterRng() * 6)
+      buildLavaLake(this, lx, ly, lz, 3)
     }
   }
 
@@ -476,7 +520,7 @@ export class World {
     this.setBlock(x, topY + 1, z, snowBiome ? 'snow' : 'leaves')
   }
 
-  // ----- Chunk meshing (unchanged from previous version) -----
+  // ----- Chunk meshing -----
 
   private rebuildChunk(scene: THREE.Scene, cx: number, cz: number): void {
     const i = cx + cz * CHUNKS_X
@@ -522,21 +566,18 @@ export class World {
     const x0 = cx * CHUNK_SIZE
     const z0 = cz * CHUNK_SIZE
 
-    const FACE_CORNERS: Record<number, [number, number, number][]> = {
-      0: [[0, 1, 0], [1, 1, 0], [1, 1, 1], [0, 1, 1]],
-      2: [[0, 0, 1], [1, 0, 1], [1, 0, 0], [0, 0, 0]],
-      1: [[1, 0, 0], [1, 0, 1], [1, 1, 1], [1, 1, 0]],
-      3: [[0, 0, 1], [0, 0, 0], [0, 1, 0], [0, 1, 1]],
-      4: [[1, 0, 1], [0, 0, 1], [0, 1, 1], [1, 1, 1]],
-      5: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]],
-    }
-    const FACE_DEFS = [
-      { dir: [0, 1, 0] as const, n: [0, 1, 0] as const, faceKind: 0, corners: FACE_CORNERS[0] },
-      { dir: [0, -1, 0] as const, n: [0, -1, 0] as const, faceKind: 2, corners: FACE_CORNERS[2] },
-      { dir: [1, 0, 0] as const, n: [1, 0, 0] as const, faceKind: 1, corners: FACE_CORNERS[1] },
-      { dir: [-1, 0, 0] as const, n: [-1, 0, 0] as const, faceKind: 1, corners: FACE_CORNERS[3] },
-      { dir: [0, 0, 1] as const, n: [0, 0, 1] as const, faceKind: 1, corners: FACE_CORNERS[4] },
-      { dir: [0, 0, -1] as const, n: [0, 0, -1] as const, faceKind: 1, corners: FACE_CORNERS[5] },
+    const FACE_DEFS: {
+      dir: [number, number, number]
+      corners: [number, number, number][]
+      normal: [number, number, number]
+      faceKind: 0 | 1 | 2
+    }[] = [
+      { dir: [0, 1, 0], corners: [[0,1,1],[1,1,1],[1,1,0],[0,1,0]], normal: [0,1,0], faceKind: 0 },
+      { dir: [0, -1, 0], corners: [[0,0,0],[1,0,0],[1,0,1],[0,0,1]], normal: [0,-1,0], faceKind: 2 },
+      { dir: [1, 0, 0], corners: [[1,0,1],[1,0,0],[1,1,0],[1,1,1]], normal: [1,0,0], faceKind: 1 },
+      { dir: [-1, 0, 0], corners: [[0,0,0],[0,0,1],[0,1,1],[0,1,0]], normal: [-1,0,0], faceKind: 1 },
+      { dir: [0, 0, 1], corners: [[0,0,1],[1,0,1],[1,1,1],[0,1,1]], normal: [0,0,1], faceKind: 1 },
+      { dir: [0, 0, -1], corners: [[1,0,0],[0,0,0],[0,1,0],[1,1,0]], normal: [0,0,-1], faceKind: 1 },
     ]
 
     let hasGeometry = false
@@ -549,30 +590,30 @@ export class World {
           const block = this.getBlock(wx, ly, wz)
           if (block === 'air') continue
           const def = BLOCKS[block]
+          if (!def) continue
           const isTranslucent = !!def.translucent
           const isCutout = !!def.transparent && !isTranslucent
           if (pass === 'opaque' && def.transparent) continue
           if (pass === 'cutout' && !isCutout) continue
           if (pass === 'translucent' && !isTranslucent) continue
 
-          // Cross-shaped blocks (flowers, cactus, ladder) only render on +X/-X/+Z/-Z faces.
           const isCross = !!def.cross
-          // Slab: only renders top face at y+0.5 (handled separately below).
           const isSlab = !!def.slab
 
           for (const face of FACE_DEFS) {
-            // Cross blocks: skip top and bottom faces.
             if (isCross && face.faceKind !== 1) continue
             const nb = this.getBlockForCulling(wx + face.dir[0], ly + face.dir[1], wz + face.dir[2])
             if (nb === block) continue
             if (nb !== 'air') {
               const nbDef = BLOCKS[nb]
-              const nbTranslucent = !!nbDef.translucent
-              const nbCutout = !!nbDef.transparent && !nbTranslucent
-              const nbOpaque = !nbDef.transparent
-              if (pass === 'opaque' && nbOpaque) continue
-              if (pass === 'cutout' && nbCutout) continue
-              if (pass === 'translucent' && nbTranslucent) continue
+              if (nbDef) {
+                const nbTranslucent = !!nbDef.translucent
+                const nbCutout = !!nbDef.transparent && !nbTranslucent
+                const nbOpaque = !nbDef.transparent
+                if (pass === 'opaque' && nbOpaque) continue
+                if (pass === 'cutout' && nbCutout) continue
+                if (pass === 'translucent' && nbTranslucent) continue
+              }
             }
             const tile = def.tiles[face.faceKind]
             const [u0, v0, u1, v1] = tileUV(tile)
@@ -580,25 +621,16 @@ export class World {
             const r = shade, g = shade, b = shade
 
             if (isCross) {
-              // Diagonal X-shaped plant (flowers, cactus). Two crossed quads.
               this.pushCrossFace(positions, normals, uvs, colors, wx, ly, wz, u0, v0, u1, v1, r, g, b)
               hasGeometry = true
-              continue
-            }
-            if (isSlab) {
-              // Slab occupies bottom half. Move top face down to y+0.5.
+              break
+            } else if (isSlab) {
               this.pushSlabFace(positions, normals, uvs, colors, face, wx, ly, wz, u0, v0, u1, v1, r, g, b)
               hasGeometry = true
-              continue
+            } else {
+              this.pushFace(positions, normals, uvs, colors, face.corners, face.normal, wx, ly, wz, u0, v0, u1, v1, r, g, b)
+              hasGeometry = true
             }
-
-            for (const c of face.corners) {
-              positions.push(wx + c[0], ly + c[1], wz + c[2])
-              normals.push(face.n[0], face.n[1], face.n[2])
-              colors.push(r, g, b)
-            }
-            uvs.push(u0, v0, u1, v0, u1, v1, u0, v1)
-            hasGeometry = true
           }
         }
       }
@@ -606,80 +638,71 @@ export class World {
 
     if (!hasGeometry) return null
 
-    const faceCount = positions.length / 3 / 4
-    const indices = new Uint32Array(faceCount * 6)
-    // NOTE: index winding is (0,2,1)(0,3,2) — REVERSED from the naive (0,1,2)(0,2,3).
-    // The FACE_CORNERS arrays are stored in an order whose right-hand-rule normal points
-    // INWARD (opposite to the declared outward normal in FACE_DEFS). With the opaque
-    // material using the default THREE.FrontSide, the naive winding would cull every
-    // outward-facing side, making opaque blocks appear see-through. Reversing the index
-    // order flips the winding so the outward face is the front face (rendered), while
-    // leaving UV-to-corner mapping intact (so textures are not mirrored). This single
-    // index change fixes regular quads, pushCrossFace quads, and pushSlabFace quads.
-    for (let f = 0; f < faceCount; f++) {
-      const o = f * 4
-      indices[f * 6 + 0] = o + 0
-      indices[f * 6 + 1] = o + 2
-      indices[f * 6 + 2] = o + 1
-      indices[f * 6 + 3] = o + 0
-      indices[f * 6 + 4] = o + 3
-      indices[f * 6 + 5] = o + 2
-    }
-
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
     geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3))
     geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
     geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
-    geo.setIndex(new THREE.BufferAttribute(indices, 1))
-    geo.computeBoundingSphere()
     return geo
   }
 
-  /** Push two vertical diagonal quads for X-shaped plant blocks (flowers, etc.).
-   *  The quads stand upright (vertical) and cross each other in an X when
-   *  viewed from above, mimicking Minecraft's flower rendering. */
-  private pushCrossFace(positions: number[], normals: number[], uvs: number[], colors: number[],
-                        wx: number, ly: number, wz: number,
-                        u0: number, v0: number, u1: number, v1: number,
-                        r: number, g: number, b: number): void {
-    // Quad 1: vertical plane along diagonal from (0,0,0)->(1,0,1)
-    // Corners: bottom-back, bottom-front, top-front, top-back
-    const corners1: [number, number, number][] = [
-      [0, 0, 0], [1, 0, 1], [1, 1, 1], [0, 1, 0],
+  private pushCrossFace(
+    positions: number[], normals: number[], uvs: number[], colors: number[],
+    x: number, y: number, z: number,
+    u0: number, v0: number, u1: number, v1: number,
+    r: number, g: number, b: number,
+  ): void {
+    const quad1: [number, number, number][] = [
+      [0, 0, 0], [1, 0, 1], [1, 1, 1], [0, 1, 0]
     ]
-    // Quad 2: vertical plane along the other diagonal (0,0,1)->(1,0,0)
-    const corners2: [number, number, number][] = [
-      [0, 0, 1], [1, 0, 0], [1, 1, 0], [0, 1, 1],
+    this.pushFace(positions, normals, uvs, colors, quad1, [0.707, 0, 0.707], x, y, z, u0, v0, u1, v1, r, g, b)
+    const quad2: [number, number, number][] = [
+      [0, 0, 1], [1, 0, 0], [1, 1, 0], [0, 1, 1]
     ]
-    for (const corners of [corners1, corners2]) {
-      for (const c of corners) {
-        positions.push(wx + c[0], ly + c[1], wz + c[2])
-        normals.push(0, 1, 0) // approximate up-facing normal for lighting
-        colors.push(r, g, b)
-      }
-      uvs.push(u0, v0, u1, v0, u1, v1, u0, v1)
-    }
+    this.pushFace(positions, normals, uvs, colors, quad2, [0.707, 0, -0.707], x, y, z, u0, v0, u1, v1, r, g, b)
   }
 
-  /** Push a face for a slab (half-height block). */
-  private pushSlabFace(positions: number[], normals: number[], uvs: number[], colors: number[],
-                       face: { dir: readonly number[]; n: readonly number[]; faceKind: number; corners: [number, number, number][] },
-                       wx: number, ly: number, wz: number,
-                       u0: number, v0: number, u1: number, v1: number,
-                       r: number, g: number, b: number): void {
-    // For top face (faceKind 0), the corners already start at y=1 — we want y=0.5.
-    // For side faces, we want to lower the top two corners from y=1 to y=0.5.
-    // For bottom face, keep as is (already at y=0).
-    for (const c of face.corners) {
-      let y = c[1]
-      if (face.faceKind === 0) y = 0.5 // top face: lower from 1 to 0.5
-      else if (face.faceKind === 1 && y === 1) y = 0.5 // side face top edge
-      positions.push(wx + c[0], ly + y, wz + c[2])
-      normals.push(face.n[0], face.n[1], face.n[2])
+  private pushSlabFace(
+    positions: number[], normals: number[], uvs: number[], colors: number[],
+    face: { dir: [number, number, number]; corners: [number, number, number][]; normal: [number, number, number]; faceKind: 0 | 1 | 2 },
+    x: number, y: number, z: number,
+    u0: number, v0: number, u1: number, v1: number,
+    r: number, g: number, b: number,
+  ): void {
+    const corners: [number, number, number][] = face.corners.map(([cx, cy, cz]) => [
+      cx,
+      cy === 1 ? 0.5 : 0,
+      cz,
+    ])
+    this.pushFace(positions, normals, uvs, colors, corners, face.normal, x, y, z, u0, v0, u1, v1, r, g, b)
+  }
+
+  private pushFace(
+    positions: number[], normals: number[], uvs: number[], colors: number[],
+    corners: [number, number, number][], normal: [number, number, number],
+    x: number, y: number, z: number,
+    u0: number, v0: number, u1: number, v1: number,
+    r: number, g: number, b: number,
+  ): void {
+    const [c0, c1, c2, c3] = corners
+    const p0 = [x + c0[0], y + c0[1], z + c0[2]]
+    const p1 = [x + c1[0], y + c1[1], z + c1[2]]
+    const p2 = [x + c2[0], y + c2[1], z + c2[2]]
+    const p3 = [x + c3[0], y + c3[1], z + c3[2]]
+
+    positions.push(
+      p0[0], p0[1], p0[2],
+      p1[0], p1[1], p1[2],
+      p2[0], p2[1], p2[2],
+      p0[0], p0[1], p0[2],
+      p2[0], p2[1], p2[2],
+      p3[0], p3[1], p3[2],
+    )
+    for (let i = 0; i < 6; i++) {
+      normals.push(normal[0], normal[1], normal[2])
       colors.push(r, g, b)
     }
-    uvs.push(u0, v0, u1, v0, u1, v1, u0, v1)
+    uvs.push(u0, v0, u1, v0, u1, v1, u0, v0, u1, v1, u0, v1)
   }
 
   /** Raycast through voxel grid using DDA. Returns the first solid block hit + the face normal. */
@@ -712,8 +735,7 @@ export class World {
 
     while (t <= maxDistance) {
       const block = this.getBlock(x, y, z)
-      // Skip air, water, and non-collidable decoration blocks (flowers, ladder).
-      if (block !== 'air' && block !== 'water' && block !== 'flower_red' && block !== 'flower_yellow' && block !== 'ladder') {
+      if (block !== 'air' && block !== 'water' && block !== 'lava' && block !== 'flower_red' && block !== 'flower_yellow' && block !== 'ladder') {
         return { x, y, z, nx, ny, nz }
       }
       if (tMaxX < tMaxY && tMaxX < tMaxZ) {
@@ -746,5 +768,4 @@ export class World {
   }
 }
 
-// Suppress unused import warnings (these are used downstream).
 export { ATLAS_COLS, ATLAS_ROWS, TILE_SIZE, isTransparent }

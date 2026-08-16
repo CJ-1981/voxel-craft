@@ -35,10 +35,11 @@ export const ALL_BLOCK_ITEMS: ItemType[] = Object.values(ITEMS)
 
 /** What item a block drops when mined (simplified: drops itself). */
 export function blockDropItem(block: BlockType): ItemType | null {
-  if (block === 'air' || block === 'water' || block === 'bedrock') return null
+  if (block === 'air' || block === 'water' || block === 'lava' || block === 'bedrock' || block === 'spawner') return null
   if (block === 'stone') return 'block:cobblestone'
   if (block === 'grass') return 'block:dirt'
   if (block === 'leaves') return Math.random() < 0.1 ? ('block:wood' as ItemType) : null
+  if (block === 'cherry_leaves') return Math.random() < 0.1 ? ('block:cherry_wood' as ItemType) : null
   if (block === 'snow' || block === 'ice') return null
   const key = `block:${block}` as ItemType
   return ITEMS[key] ? key : null

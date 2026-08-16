@@ -12,9 +12,14 @@ import { SoundSystem } from '@/lib/game/sound'
 import { PostProcessing } from '@/lib/game/postprocessing'
 import { BreakParticles } from '@/lib/game/particles'
 import { buildSeoulCity } from '@/lib/game/seoul'
-import { Inventory, MAIN_SIZE, HOTBAR_SIZE } from '@/lib/game/inventory'
+import { buildTokyoCity } from '@/lib/game/maps/tokyo'
+import { Inventory, MAIN_SIZE, HOTBAR_SIZE, Slot } from '@/lib/game/inventory'
 import { ITEMS, blockDropItem } from '@/lib/game/items'
 import { InventoryUI } from '@/components/game/InventoryUI'
+import { ChestUI } from '@/components/game/ChestUI'
+import { generateDungeonLoot } from '@/lib/game/structures'
+
+export type MapType = 'seoul' | 'tokyo' | 'wilderness'
 
 interface GameHandle {
   world: World
@@ -105,7 +110,11 @@ export default function MinecraftGame() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const [dead, setDead] = useState(false)
 
-  // Load settings from localStorage on mount.
+  const [selectedMap, setSelectedMap] = useState<MapType>('seoul')
+  const selectedMapRef = useRef<MapType>('seoul')
+  const [openChest, setOpenChest] = useState<{ pos: { x: number; y: number; z: number }; slots: Slot[] } | null>(null)
+
+  // Load settings and map selection from localStorage on mount.
   useEffect(() => {
     try {
       const raw = localStorage.getItem('voxelcraft_settings')
@@ -113,6 +122,11 @@ export default function MinecraftGame() {
         const s = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }
         setSettings(s)
         settingsRef.current = s
+      }
+      const savedMap = localStorage.getItem('voxelcraft_selected_map') as MapType
+      if (savedMap && ['seoul', 'tokyo', 'wilderness'].includes(savedMap)) {
+        setSelectedMap(savedMap)
+        selectedMapRef.current = savedMap
       }
     } catch { /* ignore */ }
     setHasSave(World.hasSave())
@@ -167,8 +181,13 @@ export default function MinecraftGame() {
         World.clearSave()
       }
     } else {
-      // Fresh world — build Seoul landmarks city.
-      buildSeoulCity(world, scene)
+      // Fresh world — build selected map landmarks.
+      if (selectedMapRef.current === 'tokyo') {
+        buildTokyoCity(world, scene)
+      } else if (selectedMapRef.current === 'seoul') {
+        buildSeoulCity(world, scene)
+      }
+      // 'wilderness' generates pure procedural biomes with dungeons, pyramids & lava
     }
 
     // Spawn player — either from save or world center.
@@ -455,6 +474,19 @@ export default function MinecraftGame() {
       } else if (e.button === 2) {
         const hit = g.world.raycast(rayOrigin, lookDir, 6)
         if (!hit) return
+        const clickedBlock = g.world.getBlock(hit.x, hit.y, hit.z)
+        if (clickedBlock === 'chest') {
+          let loot = g.world.getChestLoot(hit.x, hit.y, hit.z)
+          if (!loot) {
+            loot = generateDungeonLoot()
+            g.world.setChestLoot(hit.x, hit.y, hit.z, loot)
+          }
+          setOpenChest({ pos: { x: hit.x, y: hit.y, z: hit.z }, slots: loot })
+          playingRef.current = false
+          setPaused(true)
+          if (document.pointerLockElement) document.exitPointerLock?.()
+          return
+        }
         const px = hit.x + hit.nx
         const py = hit.y + hit.ny
         const pz = hit.z + hit.nz
@@ -716,6 +748,18 @@ export default function MinecraftGame() {
     g.player.getLookDirection(look)
     const hit = g.world.raycast(eye, look, 6)
     if (!hit) return
+    const clickedBlock = g.world.getBlock(hit.x, hit.y, hit.z)
+    if (clickedBlock === 'chest') {
+      let loot = g.world.getChestLoot(hit.x, hit.y, hit.z)
+      if (!loot) {
+        loot = generateDungeonLoot()
+        g.world.setChestLoot(hit.x, hit.y, hit.z, loot)
+      }
+      setOpenChest({ pos: { x: hit.x, y: hit.y, z: hit.z }, slots: loot })
+      playingRef.current = false
+      setPaused(true)
+      return
+    }
     const px = hit.x + hit.nx, py = hit.y + hit.ny, pz = hit.z + hit.nz
     if (g.world.getBlock(px, py, pz) !== 'air') return
     if (Player.blockOverlapsPlayer(g.player.position.x, g.player.position.y, g.player.position.z, px, py, pz)) return
@@ -901,7 +945,8 @@ export default function MinecraftGame() {
         <div className="pointer-events-none absolute top-3 left-3 font-mono text-xs text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)] space-y-1">
           <div>FPS: <span className="text-emerald-300">{fps}</span></div>
           <div>XYZ: {position.x} / {position.y} / {position.z}</div>
-          <div>Block: {BLOCKS[HOTBAR_BLOCKS[selectedSlot]].name}</div>
+          <div>Map: <span className="text-amber-300 font-semibold">{selectedMap === 'tokyo' ? '🇯🇵 Tokyo' : selectedMap === 'seoul' ? '🇰🇷 Seoul' : '🌲 Wilderness'}</span></div>
+          <div>Block: {BLOCKS[HOTBAR_BLOCKS[selectedSlot]]?.name ?? 'Air'}</div>
           <div>Time: {hh}:{mm} {isNight ? '🌙' : '☀️'}</div>
           <div>Mode: {gameMode}{flying ? ' ✈' : ''}</div>
           <div>Mobs: {mobCount}</div>
@@ -1089,7 +1134,9 @@ export default function MinecraftGame() {
       {started && meshProgress < 1 && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm z-30 pointer-events-none">
           <div className="text-center">
-            <div className="text-white font-mono text-lg mb-3">Building Seoul…</div>
+            <div className="text-white font-mono text-lg mb-3">
+              {selectedMap === 'tokyo' ? 'Building Tokyo Megacity…' : selectedMap === 'seoul' ? 'Building Seoul City…' : 'Generating Wilderness…'}
+            </div>
             <div className="w-64 h-2 bg-zinc-700 rounded-full overflow-hidden">
               <div className="h-full bg-emerald-500 rounded-full transition-all" style={{ width: `${Math.round(meshProgress * 100)}%` }} />
             </div>
@@ -1105,7 +1152,57 @@ export default function MinecraftGame() {
             <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight mb-1" style={{ fontFamily: 'monospace' }}>
               VOXEL<span className="text-emerald-400">CRAFT</span>
             </h1>
-            <p className="text-white/60 text-xs sm:text-sm mb-5 font-mono">Build · mine · explore · survive</p>
+            <p className="text-white/60 text-xs sm:text-sm mb-4 font-mono">Build · mine · explore · survive</p>
+
+            {/* Map Selection */}
+            <div className="mb-5 p-2 bg-white/5 rounded-xl border border-white/10">
+              <div className="text-white/70 text-xs font-mono mb-2">Select World Map</div>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  onClick={() => {
+                    setSelectedMap('seoul')
+                    selectedMapRef.current = 'seoul'
+                    try { localStorage.setItem('voxelcraft_selected_map', 'seoul') } catch {}
+                  }}
+                  className={`py-2 px-2 rounded-lg text-xs font-mono font-bold transition-all ${
+                    selectedMap === 'seoul'
+                      ? 'bg-emerald-500 text-black shadow-lg shadow-emerald-500/30 ring-2 ring-emerald-300 scale-102'
+                      : 'bg-white/10 text-white/80 hover:bg-white/20'
+                  }`}
+                >
+                  🇰🇷 Seoul
+                </button>
+                <button
+                  onClick={() => {
+                    setSelectedMap('tokyo')
+                    selectedMapRef.current = 'tokyo'
+                    try { localStorage.setItem('voxelcraft_selected_map', 'tokyo') } catch {}
+                  }}
+                  className={`py-2 px-2 rounded-lg text-xs font-mono font-bold transition-all ${
+                    selectedMap === 'tokyo'
+                      ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/30 ring-2 ring-rose-300 scale-102'
+                      : 'bg-white/10 text-white/80 hover:bg-white/20'
+                  }`}
+                >
+                  🇯🇵 Tokyo
+                </button>
+                <button
+                  onClick={() => {
+                    setSelectedMap('wilderness')
+                    selectedMapRef.current = 'wilderness'
+                    try { localStorage.setItem('voxelcraft_selected_map', 'wilderness') } catch {}
+                  }}
+                  className={`py-2 px-2 rounded-lg text-xs font-mono font-bold transition-all ${
+                    selectedMap === 'wilderness'
+                      ? 'bg-amber-500 text-black shadow-lg shadow-amber-500/30 ring-2 ring-amber-300 scale-102'
+                      : 'bg-white/10 text-white/80 hover:bg-white/20'
+                  }`}
+                >
+                  🌲 Wild
+                </button>
+              </div>
+            </div>
+
             <div className="flex flex-col gap-2 mb-5">
               <button
                 onClick={() => startGame('survival')}
@@ -1134,7 +1231,7 @@ export default function MinecraftGame() {
                 <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Drag right</span> — Look</div>
                 <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">↑</span> — Jump</div>
                 <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">⛏</span> — Mine/Attack</div>
-                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">+</span> — Place</div>
+                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">+</span> — Place / Chest</div>
                 <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Run</span> — Sprint</div>
               </div>
             ) : (
@@ -1146,7 +1243,7 @@ export default function MinecraftGame() {
                 <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">Ctrl</span> — Sprint</div>
                 <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">F</span> — Toggle mode</div>
                 <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">L-Click</span> — Mine/Attack</div>
-                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">R-Click</span> — Place</div>
+                <div className="bg-white/5 rounded p-2"><span className="text-emerald-300">R-Click</span> — Place / Open Chest</div>
               </div>
             )}
             <p className="text-white/40 text-xs mt-4 font-mono">
@@ -1229,6 +1326,23 @@ export default function MinecraftGame() {
           onClose={() => {
             setShowInventory(false)
             showInventoryRef.current = false
+            playingRef.current = true
+            setPaused(false)
+            if (supportsPointerLock() && !isMobile) canvasRef.current?.requestPointerLock?.()
+            setInvVersion(v => v + 1)
+          }}
+          onChange={() => setInvVersion(v => v + 1)}
+        />
+      )}
+
+      {/* Chest Loot UI */}
+      {openChest && hudReady && (
+        <ChestUI
+          chestPos={openChest.pos}
+          chestSlots={openChest.slots}
+          playerInventory={inventoryRef.current}
+          onClose={() => {
+            setOpenChest(null)
             playingRef.current = true
             setPaused(false)
             if (supportsPointerLock() && !isMobile) canvasRef.current?.requestPointerLock?.()

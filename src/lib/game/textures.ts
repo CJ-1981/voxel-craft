@@ -6,8 +6,8 @@ import * as THREE from 'three'
 
 export const TILE_SIZE = 16 // pixels per tile
 export const ATLAS_COLS = 4
-export const ATLAS_ROWS = 8 // grew from 4 to 8 to fit new blocks
-export const ATLAS_TILES = 32
+export const ATLAS_ROWS = 12 // 48 tiles total (supports base + biomes + structures + tokyo blocks)
+export const ATLAS_TILES = 48
 
 type RGB = [number, number, number]
 
@@ -99,254 +99,315 @@ function drawPlanks(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
       fill(ctx, ox + x, oy + y, n ? [142, 106, 60] : base)
     }
   }
-  for (let y = 0; y < TILE_SIZE; y += 4) {
-    for (let x = 0; x < TILE_SIZE; x++) fill(ctx, ox + x, oy + y, [110, 80, 44])
-  }
 }
 function drawCobblestone(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  noisy(ctx, ox, oy, [110, 110, 110], [[88, 88, 88], [128, 128, 128], [98, 98, 98]], 0.5)
-  ctx.fillStyle = 'rgb(70,70,70)'
-  for (let i = 0; i < 6; i++) {
-    const x = Math.floor(Math.random() * TILE_SIZE)
-    const y = Math.floor(Math.random() * TILE_SIZE)
-    fill(ctx, ox + x, oy + y, [70, 70, 70])
-  }
+  noisy(ctx, ox, oy, [100, 100, 100], [[80, 80, 80], [120, 120, 120], [60, 60, 60], [140, 140, 140]], 0.55)
 }
 function drawBedrock(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  noisy(ctx, ox, oy, [60, 60, 60], [[40, 40, 40], [80, 80, 80], [50, 50, 50]], 0.6)
+  noisy(ctx, ox, oy, [40, 40, 40], [[20, 20, 20], [60, 60, 60], [10, 10, 10]], 0.5)
 }
 function drawGlass(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
   ctx.clearRect(ox, oy, TILE_SIZE, TILE_SIZE)
-  for (let y = 0; y < TILE_SIZE; y++) {
-    for (let x = 0; x < TILE_SIZE; x++) {
-      ctx.fillStyle = 'rgba(200,220,230,0.22)'
-      ctx.fillRect(ox + x, oy + y, 1, 1)
-    }
-  }
-  ctx.fillStyle = 'rgb(180,210,225)'
-  for (let i = 0; i < TILE_SIZE; i++) {
-    fill(ctx, ox + i, oy + 0, [180, 210, 225])
-    fill(ctx, ox + i, oy + 15, [180, 210, 225])
-    fill(ctx, ox + 0, oy + i, [180, 210, 225])
-    fill(ctx, ox + 15, oy + i, [180, 210, 225])
-  }
-  for (let i = 2; i < 6; i++) fill(ctx, ox + i, oy + i, [240, 250, 255])
+  ctx.fillStyle = 'rgba(210, 235, 255, 0.4)'
+  ctx.fillRect(ox, oy, TILE_SIZE, TILE_SIZE)
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)'
+  ctx.strokeRect(ox + 0.5, oy + 0.5, TILE_SIZE - 1, TILE_SIZE - 1)
+  fill(ctx, ox + 3, oy + 3, [255, 255, 255])
+  fill(ctx, ox + 4, oy + 4, [255, 255, 255])
+  fill(ctx, ox + 5, oy + 5, [255, 255, 255])
 }
 function drawBrick(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  for (let y = 0; y < TILE_SIZE; y++) for (let x = 0; x < TILE_SIZE; x++) fill(ctx, ox + x, oy + y, [156, 74, 58])
-  ctx.fillStyle = 'rgb(200,190,180)'
-  for (let y = 0; y < TILE_SIZE; y += 4) for (let x = 0; x < TILE_SIZE; x++) fill(ctx, ox + x, oy + y, [200, 190, 180])
-  for (let y = 0; y < TILE_SIZE; y += 8) for (let x = 0; x < TILE_SIZE; x += 8) for (let dy = 0; dy < 4; dy++) fill(ctx, ox + x, oy + y + dy, [200, 190, 180])
-  for (let y = 4; y < TILE_SIZE; y += 8) for (let x = 4; x < TILE_SIZE; x += 8) for (let dy = 0; dy < 4; dy++) fill(ctx, ox + x, oy + y + dy, [200, 190, 180])
+  for (let y = 0; y < TILE_SIZE; y++) {
+    const isMortarY = y % 4 === 0
+    for (let x = 0; x < TILE_SIZE; x++) {
+      const row = Math.floor(y / 4)
+      const offset = (row % 2) * 4
+      const isMortarX = (x + offset) % 8 === 0
+      if (isMortarY || isMortarX) {
+        fill(ctx, ox + x, oy + y, [190, 180, 170])
+      } else {
+        const v = Math.random() < 0.2 ? [160, 60, 48] : [144, 52, 40]
+        fill(ctx, ox + x, oy + y, v as RGB)
+      }
+    }
+  }
+}
+function drawOre(ctx: CanvasRenderingContext2D, ox: number, oy: number, oreColor: RGB, oreLight: RGB) {
+  drawStone(ctx, ox, oy)
+  const clusters = [
+    [3, 4], [4, 4], [4, 5],
+    [9, 10], [10, 10], [10, 11], [11, 10],
+    [11, 3], [12, 3], [12, 4],
+    [5, 11], [6, 12],
+  ]
+  for (const [cx, cy] of clusters) {
+    fill(ctx, ox + cx, oy + cy, Math.random() < 0.4 ? oreLight : oreColor)
+  }
 }
 function drawGold(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  noisy(ctx, ox, oy, [128, 128, 128], [[112, 112, 112], [142, 142, 142]], 0.4)
-  for (let i = 0; i < 10; i++) {
-    const x = Math.floor(Math.random() * TILE_SIZE)
-    const y = Math.floor(Math.random() * TILE_SIZE)
-    fill(ctx, ox + x, oy + y, [240, 200, 60])
-  }
+  drawOre(ctx, ox, oy, [230, 190, 50], [255, 225, 90])
 }
 function drawDiamond(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  noisy(ctx, ox, oy, [128, 128, 128], [[112, 112, 112], [142, 142, 142]], 0.4)
-  for (let i = 0; i < 8; i++) {
-    const x = Math.floor(Math.random() * TILE_SIZE)
-    const y = Math.floor(Math.random() * TILE_SIZE)
-    fill(ctx, ox + x, oy + y, [120, 230, 230])
-  }
+  drawOre(ctx, ox, oy, [75, 220, 230], [160, 245, 255])
 }
-
-// ----- New tile drawers (16-29) -----
-
 function drawSnow(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  noisy(ctx, ox, oy, [240, 245, 250], [[230, 236, 244], [248, 252, 255], [222, 228, 238]], 0.4)
+  noisy(ctx, ox, oy, [240, 244, 248], [[228, 234, 240], [250, 252, 255], [216, 224, 232]], 0.35)
 }
 function drawIce(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  for (let y = 0; y < TILE_SIZE; y++) {
-    for (let x = 0; x < TILE_SIZE; x++) {
-      const ripple = Math.sin((x + y) * 0.5) * 0.5
-      const alpha = 0.55 + ripple * 0.15
-      ctx.fillStyle = `rgba(150,200,240,${Math.max(0.4, Math.min(0.85, alpha))})`
-      ctx.fillRect(ox + x, oy + y, 1, 1)
-    }
-  }
-  // Cracks
-  for (let i = 0; i < 4; i++) {
-    const x = Math.floor(Math.random() * TILE_SIZE)
-    const y = Math.floor(Math.random() * TILE_SIZE)
-    fill(ctx, ox + x, oy + y, [200, 230, 250])
-  }
+  ctx.clearRect(ox, oy, TILE_SIZE, TILE_SIZE)
+  ctx.fillStyle = 'rgba(175, 215, 245, 0.75)'
+  ctx.fillRect(ox, oy, TILE_SIZE, TILE_SIZE)
+  noisy(ctx, ox, oy, [175, 215, 245], [[195, 230, 255], [155, 198, 232]], 0.3)
 }
 function drawCactus(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  // Green body with darker border
-  for (let y = 0; y < TILE_SIZE; y++) {
-    for (let x = 0; x < TILE_SIZE; x++) {
-      const edge = x < 2 || x > 13
-      const base: RGB = edge ? [60, 110, 50] : [80, 140, 65]
-      fill(ctx, ox + x, oy + y, base)
+  noisy(ctx, ox, oy, [70, 125, 45], [[60, 110, 38], [82, 142, 55]], 0.4)
+  for (let y = 1; y < TILE_SIZE - 1; y += 3) {
+    for (let x = 2; x < TILE_SIZE - 2; x += 4) {
+      fill(ctx, ox + x, oy + y, [30, 55, 20])
     }
-  }
-  // Spines
-  for (let i = 0; i < 6; i++) {
-    const x = 4 + Math.floor(Math.random() * 8)
-    const y = 2 + Math.floor(Math.random() * 12)
-    fill(ctx, ox + x, oy + y, [220, 220, 180])
   }
 }
 function drawFlowerRed(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  // Transparent background, X-shaped plant
   ctx.clearRect(ox, oy, TILE_SIZE, TILE_SIZE)
-  // Green stem
-  for (let y = 8; y < 16; y++) fill(ctx, ox + 7, oy + y, [60, 130, 50])
-  for (let y = 8; y < 16; y++) fill(ctx, ox + 8, oy + y, [60, 130, 50])
-  // Red petals (top)
-  for (let y = 2; y < 8; y++) {
-    for (let x = 4; x < 12; x++) {
-      const dx = x - 7.5, dy = y - 5
-      if (Math.sqrt(dx * dx + dy * dy) < 4) fill(ctx, ox + x, oy + y, [220, 50, 50])
-    }
-  }
-  // Yellow center
-  fill(ctx, ox + 7, oy + 5, [240, 220, 60])
-  fill(ctx, ox + 8, oy + 5, [240, 220, 60])
-  fill(ctx, ox + 7, oy + 6, [240, 220, 60])
-  fill(ctx, ox + 8, oy + 6, [240, 220, 60])
+  for (let y = 7; y < 16; y++) fill(ctx, ox + 8, oy + y, [60, 130, 40])
+  fill(ctx, ox + 7, oy + 12, [60, 130, 40])
+  fill(ctx, ox + 9, oy + 10, [60, 130, 40])
+  const petals = [[7,4],[8,4],[9,4],[6,5],[7,5],[8,5],[9,5],[10,5],[6,6],[7,6],[8,6],[9,6],[10,6],[7,7],[8,7],[9,7]]
+  petals.forEach(([x, y]) => fill(ctx, ox + x, oy + y, [220, 40, 40]))
+  fill(ctx, ox + 8, oy + 5, [255, 210, 50])
 }
 function drawFlowerYellow(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
   ctx.clearRect(ox, oy, TILE_SIZE, TILE_SIZE)
-  for (let y = 8; y < 16; y++) fill(ctx, ox + 7, oy + y, [60, 130, 50])
-  for (let y = 8; y < 16; y++) fill(ctx, ox + 8, oy + y, [60, 130, 50])
-  for (let y = 2; y < 8; y++) {
-    for (let x = 4; x < 12; x++) {
-      const dx = x - 7.5, dy = y - 5
-      if (Math.sqrt(dx * dx + dy * dy) < 4) fill(ctx, ox + x, oy + y, [240, 220, 60])
-    }
-  }
-  fill(ctx, ox + 7, oy + 5, [220, 140, 40])
-  fill(ctx, ox + 8, oy + 5, [220, 140, 40])
-  fill(ctx, ox + 7, oy + 6, [220, 140, 40])
-  fill(ctx, ox + 8, oy + 6, [220, 140, 40])
+  for (let y = 7; y < 16; y++) fill(ctx, ox + 8, oy + y, [60, 130, 40])
+  fill(ctx, ox + 7, oy + 13, [60, 130, 40])
+  fill(ctx, ox + 9, oy + 11, [60, 130, 40])
+  const petals = [[7,4],[8,4],[9,4],[6,5],[7,5],[8,5],[9,5],[10,5],[6,6],[7,6],[8,6],[9,6],[10,6],[7,7],[8,7],[9,7]]
+  petals.forEach(([x, y]) => fill(ctx, ox + x, oy + y, [245, 210, 40]))
+  fill(ctx, ox + 8, oy + 5, [220, 130, 30])
 }
 function drawCoalOre(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  noisy(ctx, ox, oy, [128, 128, 128], [[112, 112, 112], [142, 142, 142]], 0.4)
-  // Coal flecks (dark)
-  for (let i = 0; i < 12; i++) {
-    const x = Math.floor(Math.random() * TILE_SIZE)
-    const y = Math.floor(Math.random() * TILE_SIZE)
-    fill(ctx, ox + x, oy + y, [30, 30, 30])
-  }
+  drawOre(ctx, ox, oy, [45, 45, 45], [75, 75, 75])
 }
 function drawIronOre(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  noisy(ctx, ox, oy, [128, 128, 128], [[112, 112, 112], [142, 142, 142]], 0.4)
-  for (let i = 0; i < 10; i++) {
-    const x = Math.floor(Math.random() * TILE_SIZE)
-    const y = Math.floor(Math.random() * TILE_SIZE)
-    fill(ctx, ox + x, oy + y, [200, 160, 120])
-  }
+  drawOre(ctx, ox, oy, [195, 155, 130], [225, 185, 160])
 }
 function drawStairs(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  // Stairs texture (looks like steps from the side)
-  for (let y = 0; y < TILE_SIZE; y++) {
-    for (let x = 0; x < TILE_SIZE; x++) {
-      const stepIdx = Math.floor((15 - y) / 4) // 0..3
-      const base: RGB = [180 - stepIdx * 12, 140 - stepIdx * 8, 80 - stepIdx * 4]
-      fill(ctx, ox + x, oy + y, base)
-    }
-  }
-  // Step highlights (top edge of each step)
-  for (let s = 0; s < 4; s++) {
-    const yTop = 15 - s * 4
-    for (let x = 0; x < TILE_SIZE; x++) {
-      fill(ctx, ox + x, oy + yTop, [200, 160, 90])
-    }
+  drawPlanks(ctx, ox, oy)
+  for (let x = 0; x < TILE_SIZE; x++) {
+    fill(ctx, ox + x, oy + 7, [100, 70, 35])
+    fill(ctx, ox + x, oy + 15, [100, 70, 35])
   }
 }
 function drawSlab(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  for (let y = 0; y < TILE_SIZE; y++) {
-    const base: RGB = y < 8 ? [168, 128, 76] : [120, 88, 50]
-    for (let x = 0; x < TILE_SIZE; x++) {
-      const n = Math.random() < 0.15
-      fill(ctx, ox + x, oy + y, n ? [142, 106, 60] : base)
-    }
-  }
+  drawPlanks(ctx, ox, oy)
+  for (let x = 0; x < TILE_SIZE; x++) fill(ctx, ox + x, oy + 7, [110, 78, 42])
 }
 function drawFence(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  // Mostly transparent with vertical posts + horizontal rails
-  ctx.clearRect(ox, oy, TILE_SIZE, TILE_SIZE)
-  // Posts on left and right edges
+  drawPlanks(ctx, ox, oy)
   for (let y = 0; y < TILE_SIZE; y++) {
-    fill(ctx, ox + 1, oy + y, [120, 88, 52])
-    fill(ctx, ox + 2, oy + y, [120, 88, 52])
-    fill(ctx, ox + 13, oy + y, [120, 88, 52])
-    fill(ctx, ox + 14, oy + y, [120, 88, 52])
-  }
-  // Horizontal rails (top and bottom)
-  for (let x = 0; x < TILE_SIZE; x++) {
-    fill(ctx, ox + x, oy + 3, [140, 100, 60])
-    fill(ctx, ox + x, oy + 4, [140, 100, 60])
-    fill(ctx, ox + x, oy + 11, [140, 100, 60])
-    fill(ctx, ox + x, oy + 12, [140, 100, 60])
+    fill(ctx, ox + 4, oy + y, [110, 78, 42])
+    fill(ctx, ox + 11, oy + y, [110, 78, 42])
   }
 }
 function drawDoor(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  // Wooden door, mostly transparent border
-  ctx.clearRect(ox, oy, TILE_SIZE, TILE_SIZE)
-  for (let y = 0; y < TILE_SIZE; y++) {
-    for (let x = 2; x < 14; x++) {
-      fill(ctx, ox + x, oy + y, [140, 95, 55])
-    }
+  drawPlanks(ctx, ox, oy)
+  for (let y = 2; y <= 5; y++) {
+    for (let x = 3; x <= 6; x++) fill(ctx, ox + x, oy + y, [60, 45, 25])
+    for (let x = 9; x <= 12; x++) fill(ctx, ox + x, oy + y, [60, 45, 25])
   }
-  // Frame
-  for (let i = 0; i < TILE_SIZE; i++) {
-    fill(ctx, ox + 2, oy + i, [80, 55, 30])
-    fill(ctx, ox + 13, oy + i, [80, 55, 30])
-  }
-  // Handle
-  fill(ctx, ox + 11, oy + 8, [240, 200, 60])
-  fill(ctx, ox + 11, oy + 9, [240, 200, 60])
+  fill(ctx, ox + 12, oy + 9, [230, 200, 70])
+  fill(ctx, ox + 12, oy + 10, [210, 180, 50])
 }
 function drawLadder(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
   ctx.clearRect(ox, oy, TILE_SIZE, TILE_SIZE)
-  // Two vertical rails
   for (let y = 0; y < TILE_SIZE; y++) {
-    fill(ctx, ox + 3, oy + y, [140, 100, 60])
-    fill(ctx, ox + 12, oy + y, [140, 100, 60])
+    fill(ctx, ox + 2, oy + y, [140, 105, 55])
+    fill(ctx, ox + 13, oy + y, [140, 105, 55])
   }
-  // Horizontal rungs every 4 pixels
-  for (let y = 2; y < TILE_SIZE; y += 4) {
-    for (let x = 3; x <= 12; x++) fill(ctx, ox + x, oy + y, [160, 120, 75])
-    for (let x = 3; x <= 12; x++) fill(ctx, ox + x, oy + y + 1, [160, 120, 75])
+  for (const ry of [3, 7, 11, 15]) {
+    for (let x = 3; x <= 12; x++) fill(ctx, ox + x, oy + ry, [170, 130, 70])
   }
 }
 function drawTnt(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  // Red body with "TNT" label
   for (let y = 0; y < TILE_SIZE; y++) {
     for (let x = 0; x < TILE_SIZE; x++) {
-      const edge = y < 2 || y > 13
-      fill(ctx, ox + x, oy + y, edge ? [80, 80, 80] : [200, 50, 40])
+      if (y >= 5 && y <= 10) fill(ctx, ox + x, oy + y, [240, 240, 240])
+      else fill(ctx, ox + x, oy + y, Math.random() < 0.15 ? [190, 35, 25] : [215, 45, 30])
     }
   }
-  // White label band
-  for (let y = 6; y < 10; y++) {
-    for (let x = 2; x < 14; x++) fill(ctx, ox + x, oy + y, [240, 240, 240])
-  }
-  // "TNT" letters
-  fill(ctx, ox + 4, oy + 7, [40, 40, 40]); fill(ctx, ox + 4, oy + 8, [40, 40, 40])
-  fill(ctx, ox + 5, oy + 7, [40, 40, 40]); fill(ctx, ox + 5, oy + 8, [40, 40, 40])
-  fill(ctx, ox + 6, oy + 7, [40, 40, 40]); fill(ctx, ox + 6, oy + 8, [40, 40, 40])
-  fill(ctx, ox + 7, oy + 7, [40, 40, 40]); fill(ctx, ox + 7, oy + 8, [40, 40, 40])
-  fill(ctx, ox + 8, oy + 7, [40, 40, 40]); fill(ctx, ox + 8, oy + 8, [40, 40, 40])
-  fill(ctx, ox + 9, oy + 7, [40, 40, 40]); fill(ctx, ox + 9, oy + 8, [40, 40, 40])
-  fill(ctx, ox + 10, oy + 7, [40, 40, 40]); fill(ctx, ox + 10, oy + 8, [40, 40, 40])
-  fill(ctx, ox + 11, oy + 7, [40, 40, 40]); fill(ctx, ox + 11, oy + 8, [40, 40, 40])
+  const tntPixels = [
+    [2,7],[3,7],[4,7],[3,8],[3,9],
+    [6,7],[6,8],[6,9],[7,8],[8,7],[8,8],[8,9],
+    [10,7],[11,7],[12,7],[11,8],[11,9],
+  ]
+  tntPixels.forEach(([x, y]) => fill(ctx, ox + x, oy + y, [20, 20, 20]))
 }
 function drawGlowstone(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
-  noisy(ctx, ox, oy, [200, 170, 90], [[230, 200, 110], [180, 150, 70], [240, 220, 130]], 0.6)
-  // Bright spots
-  for (let i = 0; i < 6; i++) {
-    const x = Math.floor(Math.random() * TILE_SIZE)
-    const y = Math.floor(Math.random() * TILE_SIZE)
-    fill(ctx, ox + x, oy + y, [255, 240, 180])
+  noisy(ctx, ox, oy, [230, 195, 110], [[255, 225, 140], [210, 170, 85], [245, 210, 125], [195, 150, 70]], 0.5)
+}
+
+// ----- New v1.2 Texture Drawers (Tiles 30-42) -----
+
+function drawLava(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  for (let y = 0; y < TILE_SIZE; y++) {
+    for (let x = 0; x < TILE_SIZE; x++) {
+      const heat = Math.sin(x * 0.6) + Math.cos(y * 0.6) + (Math.random() * 0.6)
+      if (heat > 1.2) {
+        fill(ctx, ox + x, oy + y, [255, 240, 100]) // bright molten core
+      } else if (heat > 0.4) {
+        fill(ctx, ox + x, oy + y, [245, 125, 20])  // orange magma
+      } else if (heat > -0.4) {
+        fill(ctx, ox + x, oy + y, [210, 45, 15])   // deep red
+      } else {
+        fill(ctx, ox + x, oy + y, [130, 25, 10])   // cooled crust
+      }
+    }
+  }
+}
+
+function drawObsidian(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  noisy(ctx, ox, oy, [24, 18, 38], [
+    [15, 12, 26], [32, 22, 48], [45, 28, 68], [62, 38, 92], [12, 8, 20]
+  ], 0.5)
+}
+
+function drawSandstone(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  noisy(ctx, ox, oy, [215, 195, 140], [[205, 185, 130], [225, 205, 150], [195, 175, 120]], 0.35)
+}
+
+function drawSandstoneSide(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  drawSandstone(ctx, ox, oy)
+  // Strata bands
+  for (let x = 0; x < TILE_SIZE; x++) {
+    fill(ctx, ox + x, oy + 4, [190, 170, 115])
+    fill(ctx, ox + x, oy + 11, [185, 165, 110])
+    fill(ctx, ox + x, oy + 12, [175, 155, 105])
+  }
+}
+
+function drawChestTop(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  drawPlanks(ctx, ox, oy)
+  // Dark steel border
+  for (let i = 0; i < TILE_SIZE; i++) {
+    fill(ctx, ox + i, oy + 0, [50, 50, 50])
+    fill(ctx, ox + i, oy + 15, [50, 50, 50])
+    fill(ctx, ox + 0, oy + i, [50, 50, 50])
+    fill(ctx, ox + 15, oy + i, [50, 50, 50])
+  }
+}
+
+function drawChestSide(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  drawPlanks(ctx, ox, oy)
+  // Dark steel border
+  for (let i = 0; i < TILE_SIZE; i++) {
+    fill(ctx, ox + i, oy + 0, [50, 50, 50])
+    fill(ctx, ox + i, oy + 15, [50, 50, 50])
+    fill(ctx, ox + 0, oy + i, [50, 50, 50])
+    fill(ctx, ox + 15, oy + i, [50, 50, 50])
+    fill(ctx, ox + i, oy + 6, [60, 60, 60]) // lid seam
+  }
+  // Silver/gold lock clasp
+  for (let y = 5; y <= 8; y++) {
+    for (let x = 7; x <= 8; x++) {
+      fill(ctx, ox + x, oy + y, [220, 220, 220])
+    }
+  }
+  fill(ctx, ox + 7, oy + 7, [40, 40, 40])
+}
+
+function drawSpawner(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  ctx.clearRect(ox, oy, TILE_SIZE, TILE_SIZE)
+  ctx.fillStyle = 'rgb(35, 38, 44)'
+  ctx.fillRect(ox, oy, TILE_SIZE, TILE_SIZE)
+  // Iron bars cage
+  for (let i = 0; i < TILE_SIZE; i++) {
+    fill(ctx, ox + i, oy + 0, [70, 75, 85])
+    fill(ctx, ox + i, oy + 15, [70, 75, 85])
+    fill(ctx, ox + 0, oy + i, [70, 75, 85])
+    fill(ctx, ox + 15, oy + i, [70, 75, 85])
+    if (i % 3 === 0) {
+      for (let y = 0; y < TILE_SIZE; y++) fill(ctx, ox + i, oy + y, [60, 65, 75])
+      for (let x = 0; x < TILE_SIZE; x++) fill(ctx, ox + x, oy + i, [60, 65, 75])
+    }
+  }
+  // Fiery / blue core
+  for (let y = 6; y <= 9; y++) {
+    for (let x = 6; x <= 9; x++) {
+      fill(ctx, ox + x, oy + y, Math.random() < 0.5 ? [60, 180, 240] : [240, 100, 30])
+    }
+  }
+}
+
+function drawMossyCobblestone(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  drawCobblestone(ctx, ox, oy)
+  // Scatter green moss
+  const moss = [
+    [2,3],[3,3],[3,4],[4,3],
+    [7,8],[8,8],[8,9],[9,8],[9,9],[10,9],
+    [12,2],[13,2],[13,3],
+    [1,11],[2,11],[2,12],[3,12],[4,13],
+  ]
+  moss.forEach(([x, y]) => fill(ctx, ox + x, oy + y, Math.random() < 0.3 ? [50, 120, 35] : [70, 150, 45]))
+}
+
+function drawCherryLeaves(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  noisy(ctx, ox, oy, [235, 140, 175], [
+    [245, 165, 195], [225, 120, 155], [250, 185, 215], [210, 100, 140], [255, 210, 230]
+  ], 0.6)
+}
+
+function drawCherryWoodTop(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  for (let y = 0; y < TILE_SIZE; y++) {
+    for (let x = 0; x < TILE_SIZE; x++) {
+      const dx = x - 7.5, dy = y - 7.5
+      const d = Math.sqrt(dx * dx + dy * dy)
+      const ring = Math.floor(d) % 2 === 0
+      fill(ctx, ox + x, oy + y, ring ? [195, 130, 135] : [175, 110, 118])
+    }
+  }
+}
+
+function drawCherryWoodSide(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  for (let x = 0; x < TILE_SIZE; x++) {
+    const base: RGB = x % 4 < 2 ? [65, 45, 52] : [78, 55, 62]
+    for (let y = 0; y < TILE_SIZE; y++) {
+      const isLenticel = (y % 5 === 0) && (x >= 4 && x <= 8 || x >= 11 && x <= 14)
+      if (isLenticel) {
+        fill(ctx, ox + x, oy + y, [110, 85, 92])
+      } else {
+        fill(ctx, ox + x, oy + y, Math.random() < 0.15 ? [55, 38, 44] : base)
+      }
+    }
+  }
+}
+
+function drawRedWool(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  noisy(ctx, ox, oy, [205, 35, 30], [
+    [185, 25, 22], [225, 45, 38], [170, 20, 18], [235, 55, 45]
+  ], 0.4)
+}
+
+function drawLantern(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
+  ctx.clearRect(ox, oy, TILE_SIZE, TILE_SIZE)
+  // Dark wrought-iron top & bottom
+  for (let x = 3; x <= 12; x++) {
+    fill(ctx, ox + x, oy + 2, [45, 45, 45])
+    fill(ctx, ox + x, oy + 13, [45, 45, 45])
+  }
+  for (let y = 3; y <= 12; y++) {
+    fill(ctx, ox + 3, oy + y, [45, 45, 45])
+    fill(ctx, ox + 12, oy + y, [45, 45, 45])
+  }
+  // Glowing yellow/orange glass center
+  for (let y = 3; y <= 12; y++) {
+    for (let x = 4; x <= 11; x++) {
+      const dist = Math.abs(x - 7.5) + Math.abs(y - 7.5)
+      if (dist <= 3) {
+        fill(ctx, ox + x, oy + y, [255, 245, 160]) // bright core
+      } else {
+        fill(ctx, ox + x, oy + y, Math.random() < 0.3 ? [255, 200, 80] : [240, 165, 45])
+      }
+    }
   }
 }
 
@@ -359,7 +420,15 @@ const TILE_DRAWERS: ((ctx: CanvasRenderingContext2D, ox: number, oy: number) => 
   drawFlowerYellow, drawCoalOre, drawIronOre, drawStairs,   // 20-23
   drawSlab, drawFence, drawDoor, drawLadder,                // 24-27
   drawTnt, drawGlowstone,                                   // 28-29
-  // Padding for unused tiles 30, 31 (draw as solid magenta to make errors visible)
+  // New v1.2 Drawers (30-42)
+  drawLava, drawObsidian, drawSandstone, drawSandstoneSide, // 30-33
+  drawChestTop, drawChestSide, drawSpawner, drawMossyCobblestone, // 34-37
+  drawCherryLeaves, drawCherryWoodTop, drawCherryWoodSide, drawRedWool, // 38-41
+  drawLantern,                                              // 42
+  // Padding for tiles 43-47
+  (ctx, ox, oy) => { for (let y = 0; y < TILE_SIZE; y++) for (let x = 0; x < TILE_SIZE; x++) fill(ctx, ox + x, oy + y, [255, 0, 255]) },
+  (ctx, ox, oy) => { for (let y = 0; y < TILE_SIZE; y++) for (let x = 0; x < TILE_SIZE; x++) fill(ctx, ox + x, oy + y, [255, 0, 255]) },
+  (ctx, ox, oy) => { for (let y = 0; y < TILE_SIZE; y++) for (let x = 0; x < TILE_SIZE; x++) fill(ctx, ox + x, oy + y, [255, 0, 255]) },
   (ctx, ox, oy) => { for (let y = 0; y < TILE_SIZE; y++) for (let x = 0; x < TILE_SIZE; x++) fill(ctx, ox + x, oy + y, [255, 0, 255]) },
   (ctx, ox, oy) => { for (let y = 0; y < TILE_SIZE; y++) for (let x = 0; x < TILE_SIZE; x++) fill(ctx, ox + x, oy + y, [255, 0, 255]) },
 ]
@@ -385,12 +454,6 @@ export function buildAtlasTexture(): THREE.CanvasTexture {
   const canvas = buildAtlasCanvas()
   const tex = new THREE.CanvasTexture(canvas)
   tex.magFilter = THREE.NearestFilter
-  // Use NearestFilter (no mipmaps) for the atlas. The atlas has NO padding between
-  // adjacent tiles, so enabling mipmaps (NearestMipmapNearestFilter) causes lower mip
-  // levels to average pixels across tile boundaries — producing visible color bleeding
-  // (e.g. green grass-top pixels from tile 1 smear onto the adjacent dirt tile 2, then
-  // appear on vertical dirt faces in-world). NearestFilter is also the classic pixel-art
-  // look for this style of game.
   tex.minFilter = THREE.NearestFilter
   tex.generateMipmaps = false
   tex.colorSpace = THREE.SRGBColorSpace

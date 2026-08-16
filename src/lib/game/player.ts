@@ -133,7 +133,7 @@ export class Player {
     if (this.stats.invulnTimer > 0) this.stats.invulnTimer -= dt
     if (this.stats.regenTimer > 0) this.stats.regenTimer -= dt
 
-    // Detect water at eye and feet level.
+    // Detect water and lava at eye and feet level.
     const eyePos = new THREE.Vector3()
     this.getEyePosition(eyePos)
     const feetBlock = world.getBlock(
@@ -146,9 +146,16 @@ export class Player {
       Math.floor(eyePos.y),
       Math.floor(eyePos.z),
     )
-    this.inWater = feetBlock === 'water'
+    this.inWater = feetBlock === 'water' || feetBlock === 'lava'
     this.stats.feetInWater = feetBlock === 'water'
     this.stats.headInWater = headBlock === 'water'
+
+    // Lava burn damage: 4 HP per second when touching lava.
+    if ((feetBlock === 'lava' || headBlock === 'lava') && this.gameMode !== 'creative') {
+      if (this.stats.invulnTimer <= 0) {
+        this.takeDamage(4, 'mob')
+      }
+    }
 
     // Oxygen: drains when head underwater, refills when above.
     if (this.stats.headInWater && this.gameMode !== 'creative') {
