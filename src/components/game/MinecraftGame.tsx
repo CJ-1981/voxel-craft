@@ -228,6 +228,9 @@ export default function MinecraftGame() {
       },
     }
 
+    if (typeof window !== 'undefined') {
+      (window as unknown as { __game: unknown }).__game = gameRef.current
+    }
     setHudReady(true)
 
     // ----- Animation loop -----
