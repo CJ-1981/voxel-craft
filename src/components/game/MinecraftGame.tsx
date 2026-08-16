@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three'
-import { World, WORLD_SIZE_X, WORLD_SIZE_Z } from '@/lib/game/world'
+import { World, WORLD_SIZE_X, WORLD_SIZE_Z, WATER_LEVEL } from '@/lib/game/world'
 import { Player, InputState, GameMode } from '@/lib/game/player'
 import { BLOCKS, HOTBAR_BLOCKS } from '@/lib/game/blocks'
 import { buildAtlasTexture, tileDataUrl } from '@/lib/game/textures'
@@ -442,7 +442,7 @@ export default function MinecraftGame() {
         }
         // Break the block + drop its item into the inventory.
         const drop = blockDropItem(b)
-        if (drop) inventory.addItem(drop, 1)
+        if (drop) g.inventory.addItem(drop, 1)
         g.world.setBlockAndUpdate(g.scene, hit.x, hit.y, hit.z, 'air')
         particles.spawn(b, hit.x, hit.y, hit.z, 14)
         sound.blockBreak()
@@ -458,11 +458,11 @@ export default function MinecraftGame() {
         if (g.world.getBlock(px, py, pz) !== 'air') return
         if (Player.blockOverlapsPlayer(player.position.x, player.position.y, player.position.z, px, py, pz)) return
         // Place the selected hotbar block (consume from inventory).
-        const held = inventory.getSelectedItem()
+        const held = g.inventory.getSelectedItem()
         if (!held) return
         const blockType = ITEMS[held.item].blockType
         g.world.setBlockAndUpdate(g.scene, px, py, pz, blockType)
-        inventory.removeOneFromSelected()
+        g.inventory.removeOneFromSelected()
         sound.blockPlace()
         setInvVersion(v => v + 1)
         if (navigator.vibrate) navigator.vibrate(10)
@@ -481,11 +481,12 @@ export default function MinecraftGame() {
           // Close inventory first.
           setShowInventory(false)
           showInventoryRef.current = false
-          setFurnaceOpen(false)
-          setCraftingTableOpen(false)
           playingRef.current = true
           setPaused(false)
-          if (supportsPointerLock() && !isMobile) canvasRef.current?.requestPointerLock?.()
+          // Delay pointer lock to avoid browser security error
+          if (supportsPointerLock() && !isMobile) {
+            requestAnimationFrame(() => canvasRef.current?.requestPointerLock?.())
+          }
         } else if (playingRef.current) {
           playingRef.current = false
           setPaused(true)
@@ -501,8 +502,6 @@ export default function MinecraftGame() {
         if (playingRef.current) {
           setShowInventory(true)
           showInventoryRef.current = true
-          setFurnaceOpen(false)
-          setCraftingTableOpen(false)
           playingRef.current = false
           setPaused(true)
           if (supportsPointerLock() && document.pointerLockElement === canvas) {
@@ -511,11 +510,12 @@ export default function MinecraftGame() {
         } else if (showInventoryRef.current) {
           setShowInventory(false)
           showInventoryRef.current = false
-          setFurnaceOpen(false)
-          setCraftingTableOpen(false)
           playingRef.current = true
           setPaused(false)
-          if (supportsPointerLock() && !isMobile) canvasRef.current?.requestPointerLock?.()
+          // Delay pointer lock to avoid browser security error
+          if (supportsPointerLock() && !isMobile) {
+            requestAnimationFrame(() => canvasRef.current?.requestPointerLock?.())
+          }
         }
         return
       }
@@ -819,7 +819,10 @@ export default function MinecraftGame() {
     if (!g) return
     const sx = Math.floor(WORLD_SIZE_X / 2) + 0.5
     const sz = Math.floor(WORLD_SIZE_Z / 2) + 0.5
-    const sy = g.world.highestBlockY(Math.floor(sx), Math.floor(sz)) + 1
+    // Get highest solid block, but ensure spawn is above water level
+    // so player doesn't respawn underwater.
+    const groundY = g.world.highestBlockY(Math.floor(sx), Math.floor(sz)) + 1
+    const sy = Math.max(groundY, WATER_LEVEL + 1)
     g.player.respawn(sx, sy, sz)
     setDead(false)
     setPaused(false)
@@ -882,7 +885,7 @@ export default function MinecraftGame() {
 
       {/* Crosshair */}
       {hudReady && active && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center" data-testid="crosshair">
           <div className="relative w-6 h-6 opacity-80">
             <div className="absolute top-1/2 left-0 right-0 h-0.5 -translate-y-1/2 bg-white mix-blend-difference" />
             <div className="absolute left-1/2 top-0 bottom-0 w-0.5 -translate-x-1/2 bg-white mix-blend-difference" />
@@ -973,6 +976,8 @@ export default function MinecraftGame() {
             return (
               <button
                 key={i}
+                data-testid="hotbar-slot"
+                data-slot-index={i}
                 onClick={() => selectSlot(i)}
                 className={`relative flex-shrink-0 w-9 h-9 sm:w-11 sm:h-11 rounded-sm border-2 transition-colors ${
                   i === selectedSlot ? 'border-white bg-white/15' : 'border-white/20 bg-black/30 hover:border-white/50'
