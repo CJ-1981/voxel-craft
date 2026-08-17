@@ -2,8 +2,8 @@
 // Mobs have simple AABB physics, basic AI, and model meshes built from boxes.
 
 import * as THREE from 'three'
-import { World, WORLD_SIZE_X, WORLD_SIZE_Z } from './world'
-import { isSolid } from './blocks'
+import { World } from './world'
+import { isSolid, BlockType } from './blocks'
 import { Player } from './player'
 import type { BreakParticles } from './particles'
 
@@ -216,13 +216,13 @@ export class Mob {
     return false
   }
 
-  private worldBlockAhead(world: World): string | null {
+  private worldBlockAhead(world: World): BlockType | null {
     const dx = Math.sin(this.yaw)
     const dz = Math.cos(this.yaw)
     const x = Math.floor(this.position.x + dx * (this.hw + 0.2))
     const y = Math.floor(this.position.y)
     const z = Math.floor(this.position.z + dz * (this.hw + 0.2))
-    return world.getBlock(x, y, z) as string
+    return world.getBlock(x, y, z)
   }
 
   private moveAxis(world: World, axis: 'x' | 'y' | 'z', amount: number): void {
@@ -314,7 +314,8 @@ export class MobManager {
         const dist = 8 + Math.random() * 8
         const sx = Math.floor(player.position.x + Math.cos(angle) * dist)
         const sz = Math.floor(player.position.z + Math.sin(angle) * dist)
-        if (sx >= 0 && sx < WORLD_SIZE_X && sz >= 0 && sz < WORLD_SIZE_Z) {
+        // Endless world: only spawn on terrain that is actually streamed in.
+        if (world.isChunkLoaded(sx, sz)) {
           const surfY = world.highestBlockY(sx, sz)
           if (surfY > 0) {
             const type: MobType = isNight ? (Math.random() < 0.7 ? 'zombie' : 'sheep') : 'sheep'

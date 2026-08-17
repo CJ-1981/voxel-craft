@@ -123,7 +123,6 @@ export class Player {
     this.stats.invulnTimer = 1.0
     this.stats.regenTimer = 0
     this.stats.fallDistance = 0
-    this.fallDistance = 0
   }
 
   update(world: World, input: InputState, dt: number): void {

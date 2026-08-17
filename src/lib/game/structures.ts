@@ -8,8 +8,8 @@ export interface ChestContent {
   slots: Slot[]
 }
 
-/** Random dungeon loot generator. */
-export function generateDungeonLoot(): Slot[] {
+/** Random dungeon loot generator. Pass a seeded rand for deterministic loot. */
+export function generateDungeonLoot(rand: () => number = Math.random): Slot[] {
   const lootTable: { item: string; min: number; max: number; chance: number }[] = [
     { item: 'block:diamond', min: 1, max: 4, chance: 0.3 },
     { item: 'block:gold', min: 2, max: 8, chance: 0.5 },
@@ -27,8 +27,8 @@ export function generateDungeonLoot(): Slot[] {
   const itemsToAdd: { item: any; count: number }[] = []
 
   for (const entry of lootTable) {
-    if (Math.random() < entry.chance) {
-      const count = Math.floor(Math.random() * (entry.max - entry.min + 1)) + entry.min
+    if (rand() < entry.chance) {
+      const count = Math.floor(rand() * (entry.max - entry.min + 1)) + entry.min
       itemsToAdd.push({ item: entry.item, count })
     }
   }
@@ -46,8 +46,10 @@ export function generateDungeonLoot(): Slot[] {
 
 /**
  * Builds an underground dungeon (5x5 room with cobblestone/mossy walls, spawner, and loot chest).
+ * `rand` must be a seeded generator so the dungeon regenerates identically
+ * from any chunk that overlaps it.
  */
-export function buildDungeon(world: World, cx: number, cy: number, cz: number): void {
+export function buildDungeon(world: World, cx: number, cy: number, cz: number, rand: () => number): void {
   const rx = 3, rz = 3, h = 4
 
   for (let dx = -rx; dx <= rx; dx++) {
@@ -56,8 +58,8 @@ export function buildDungeon(world: World, cx: number, cy: number, cz: number): 
       const z = cz + dz
 
       // Floor & Ceiling
-      const floorBlock: BlockType = Math.random() < 0.35 ? 'mossy_cobblestone' : 'cobblestone'
-      const ceilBlock: BlockType = Math.random() < 0.25 ? 'mossy_cobblestone' : 'cobblestone'
+      const floorBlock: BlockType = rand() < 0.35 ? 'mossy_cobblestone' : 'cobblestone'
+      const ceilBlock: BlockType = rand() < 0.25 ? 'mossy_cobblestone' : 'cobblestone'
       world.setBlock(x, cy, z, floorBlock)
       world.setBlock(x, cy + h, z, ceilBlock)
 
@@ -66,7 +68,7 @@ export function buildDungeon(world: World, cx: number, cy: number, cz: number): 
         const y = cy + dy
         const isWall = Math.abs(dx) === rx || Math.abs(dz) === rz
         if (isWall) {
-          const wallBlock: BlockType = Math.random() < 0.3 ? 'mossy_cobblestone' : 'cobblestone'
+          const wallBlock: BlockType = rand() < 0.3 ? 'mossy_cobblestone' : 'cobblestone'
           world.setBlock(x, y, z, wallBlock)
         } else {
           world.setBlock(x, y, z, 'air')
@@ -78,23 +80,28 @@ export function buildDungeon(world: World, cx: number, cy: number, cz: number): 
   // Central Monster Spawner
   world.setBlock(cx, cy + 1, cz, 'spawner')
 
-  // 1-2 Chests along the walls
+  // 1-2 Chests along the walls (loot only seeded the first time the chest appears)
   const chestPos1 = { x: cx + rx - 1, y: cy + 1, z: cz }
   world.setBlock(chestPos1.x, chestPos1.y, chestPos1.z, 'chest')
-  world.setChestLoot(chestPos1.x, chestPos1.y, chestPos1.z, generateDungeonLoot())
+  if (!world.getChestLoot(chestPos1.x, chestPos1.y, chestPos1.z)) {
+    world.setChestLoot(chestPos1.x, chestPos1.y, chestPos1.z, generateDungeonLoot(rand))
+  }
 
-  if (Math.random() < 0.5) {
+  if (rand() < 0.5) {
     const chestPos2 = { x: cx - rx + 1, y: cy + 1, z: cz }
     world.setBlock(chestPos2.x, chestPos2.y, chestPos2.z, 'chest')
-    world.setChestLoot(chestPos2.x, chestPos2.y, chestPos2.z, generateDungeonLoot())
+    if (!world.getChestLoot(chestPos2.x, chestPos2.y, chestPos2.z)) {
+      world.setChestLoot(chestPos2.x, chestPos2.y, chestPos2.z, generateDungeonLoot(rand))
+    }
   }
 }
 
 /**
  * Builds a Desert Pyramid with stepped sandstone, central chamber, and hidden trap vault.
+ * `baseY` is passed in (from the pure height function) so generation stays
+ * deterministic regardless of which chunk builds the pyramid.
  */
-export function buildDesertPyramid(world: World, cx: number, cz: number): void {
-  const baseY = world.highestBlockY(cx, cz)
+export function buildDesertPyramid(world: World, cx: number, cz: number, baseY: number, rand: () => number): void {
   if (baseY < 12 || baseY > 30) return
 
   const size = 11 // 11x11 base
@@ -172,7 +179,9 @@ export function buildDesertPyramid(world: World, cx: number, cz: number): void {
 
     for (const cp of chestPositions) {
       world.setBlock(cp.x, cp.y, cp.z, 'chest')
-      world.setChestLoot(cp.x, cp.y, cp.z, generateDungeonLoot())
+      if (!world.getChestLoot(cp.x, cp.y, cp.z)) {
+        world.setChestLoot(cp.x, cp.y, cp.z, generateDungeonLoot(rand))
+      }
     }
 
     // Central TNT Trap
@@ -184,7 +193,7 @@ export function buildDesertPyramid(world: World, cx: number, cz: number): void {
 /**
  * Builds a natural Lava Lake in a basin.
  */
-export function buildLavaLake(world: World, cx: number, cy: number, cz: number, radius = 3): void {
+export function buildLavaLake(world: World, cx: number, cy: number, cz: number, radius = 3, rand: () => number = Math.random): void {
   for (let dx = -radius; dx <= radius; dx++) {
     for (let dz = -radius; dz <= radius; dz++) {
       const dist = Math.sqrt(dx * dx + dz * dz)
@@ -192,7 +201,7 @@ export function buildLavaLake(world: World, cx: number, cy: number, cz: number, 
         const x = cx + dx
         const z = cz + dz
         // Bed of obsidian/stone underneath
-        world.setBlock(x, cy - 1, z, Math.random() < 0.4 ? 'obsidian' : 'stone')
+        world.setBlock(x, cy - 1, z, rand() < 0.4 ? 'obsidian' : 'stone')
         // Lava liquid
         world.setBlock(x, cy, z, 'lava')
         // Air above
@@ -202,7 +211,7 @@ export function buildLavaLake(world: World, cx: number, cy: number, cz: number, 
         // Stone rim
         const x = cx + dx
         const z = cz + dz
-        world.setBlock(x, cy, z, Math.random() < 0.3 ? 'obsidian' : 'stone')
+        world.setBlock(x, cy, z, rand() < 0.3 ? 'obsidian' : 'stone')
       }
     }
   }

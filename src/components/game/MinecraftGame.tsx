@@ -11,6 +11,7 @@ import { MobManager } from '@/lib/game/mobs'
 import { SoundSystem } from '@/lib/game/sound'
 import { PostProcessing } from '@/lib/game/postprocessing'
 import { BreakParticles } from '@/lib/game/particles'
+import { Minimap } from '@/lib/game/minimap'
 import { buildSeoulCity } from '@/lib/game/seoul'
 import { buildTokyoCity } from '@/lib/game/maps/tokyo'
 import { Inventory, MAIN_SIZE, HOTBAR_SIZE, Slot } from '@/lib/game/inventory'
@@ -34,6 +35,7 @@ interface GameHandle {
   sound: SoundSystem
   post: PostProcessing
   particles: BreakParticles
+  minimap: Minimap | null
   inventory: Inventory
   dispose: () => void
 }
@@ -55,22 +57,26 @@ interface Settings {
   soundEnabled: boolean
   postProcessing: boolean
   bloom: boolean
+  unlimitedMap: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
   fov: 75,
   sensitivity: 0.0022,
-  renderDistance: 64,
+  renderDistance: 96,
   volume: 0.5,
   soundEnabled: true,
   // Default OFF — post-processing is heavy on low-end devices. Users can
   // enable it in Settings for the cinematic bloom/vignette look.
   postProcessing: false,
   bloom: true,
+  // Default OFF — endless chunk streaming consumes significant CPU/GPU.
+  unlimitedMap: false,
 }
 
 export default function MinecraftGame() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const minimapCanvasRef = useRef<HTMLCanvasElement>(null)
   const gameRef = useRef<GameHandle | null>(null)
   const selectedSlotRef = useRef(0)
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS)
@@ -106,6 +112,7 @@ export default function MinecraftGame() {
   const [timeOfDay, setTimeOfDay] = useState(0.3)
   const [isNight, setIsNight] = useState(false)
   const [mobCount, setMobCount] = useState(0)
+  const [chunkCount, setChunkCount] = useState(0)
   const [flying, setFlying] = useState(false)
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const [dead, setDead] = useState(false)
@@ -146,6 +153,8 @@ export default function MinecraftGame() {
       g.sound.setEnabled(s.soundEnabled)
       g.post.setEnabled(s.postProcessing)
       g.post.setBloomStrength(s.bloom ? 0.5 : 0)
+      g.world.setRenderDistance(s.renderDistance)
+      g.world.setUnlimitedMap(s.unlimitedMap)
     }
   }, [])
 
@@ -166,15 +175,17 @@ export default function MinecraftGame() {
 
     const scene = new THREE.Scene()
     scene.background = new THREE.Color(0x8fc4ff)
-    scene.fog = new THREE.Fog(0x8fc4ff, 60, 140)
 
     const s = settingsRef.current
+    // Fog hides the streaming chunk edge — tie it to the render distance.
+    scene.fog = new THREE.Fog(0x8fc4ff, s.renderDistance * 0.45, s.renderDistance)
+
     const camera = new THREE.PerspectiveCamera(s.fov, window.innerWidth / window.innerHeight, 0.1, 600)
 
     const atlas = buildAtlasTexture()
     // Try to load saved world; if found, use the saved seed.
     const meta = World.loadMeta()
-    const world = new World(scene, atlas, meta?.seed)
+    const world = new World(scene, atlas, meta?.seed, meta ? { x: meta.playerX, z: meta.playerZ } : undefined, s.unlimitedMap)
     if (World.hasSave() && meta) {
       const result = world.loadFromSave(scene)
       if (!result) {
@@ -222,6 +233,9 @@ export default function MinecraftGame() {
     // demolition particles.
     mobs.setParticles(particles)
 
+    // Corner minimap (canvas is always mounted; hidden until the game starts).
+    const minimap = minimapCanvasRef.current ? new Minimap(minimapCanvasRef.current) : null
+
     const input: InputState = {
       forward: false, back: false, left: false, right: false,
       jump: false, sprint: false, crouch: false,
@@ -229,7 +243,8 @@ export default function MinecraftGame() {
 
     gameRef.current = {
       world, player, scene, camera, renderer, input, selectionMesh,
-      dayNight, mobs, sound, post, particles, inventory: inventoryRef.current,
+      dayNight, mobs, sound, post, particles, minimap,
+      inventory: inventoryRef.current,
       dispose: () => {
         renderer.dispose()
         atlas.dispose()
@@ -241,6 +256,8 @@ export default function MinecraftGame() {
         sound.dispose()
         post.dispose()
         particles.dispose()
+        minimap?.dispose()
+        world.dispose()
         scene.traverse(obj => {
           if (obj instanceof THREE.Mesh) obj.geometry?.dispose?.()
         })
@@ -262,6 +279,7 @@ export default function MinecraftGame() {
     let rafId = 0
     let hudAccum = 0
     let autoSaveAccum = 0
+    let minimapAccum = 0
 
     const loop = () => {
       rafId = requestAnimationFrame(loop)
@@ -274,6 +292,8 @@ export default function MinecraftGame() {
         mobs.update(world, player, dayNight.isNight(), dt)
         dayNight.update(dt, player.position)
         particles.update(dt)
+        // Endless terrain: stream chunks in around the player (budgeted).
+        world.updateStreaming(scene, player.position.x, player.position.z, 2)
 
         // Footstep audio: when walking on ground, play a sound every ~0.35m.
         const horizSpeed = Math.sqrt(player.velocity.x * player.velocity.x + player.velocity.z * player.velocity.z)
@@ -335,6 +355,19 @@ export default function MinecraftGame() {
         setMeshProgress(world.meshProgress)
       }
 
+      // Minimap redraw (~8 Hz).
+      if (minimap) {
+        minimapAccum += dt
+        if (minimapAccum >= 0.12) {
+          minimapAccum = 0
+          minimap.update(
+            world,
+            mobs.mobs.map(m => ({ x: m.position.x, z: m.position.z, hostile: m.type === 'zombie' })),
+            player.position.x, player.position.z, player.yaw,
+          )
+        }
+      }
+
       // Render via post-processing composer (which includes the scene render
       // pass), or fall back to direct rendering for performance.
       if (post.enabled) {
@@ -367,6 +400,7 @@ export default function MinecraftGame() {
         setTimeOfDay(dayNight.timeOfDay)
         setIsNight(dayNight.isNight())
         setMobCount(mobs.mobs.length)
+        setChunkCount(world.chunkCount)
         setFlying(player.flying)
       }
     }
@@ -378,6 +412,7 @@ export default function MinecraftGame() {
       camera.updateProjectionMatrix()
       renderer.setSize(window.innerWidth, window.innerHeight)
       post.resize(window.innerWidth, window.innerHeight)
+      minimap?.resize()
     }
     window.addEventListener('resize', onResize)
     window.addEventListener('orientationchange', onResize)
@@ -571,6 +606,10 @@ export default function MinecraftGame() {
         setGameMode(player.gameMode)
         if (player.gameMode === 'survival') player.flying = false
       }
+      if (c === 'KeyM') {
+        // Cycle the minimap zoom (2 → 1 → 4 px/block).
+        gameRef.current?.minimap?.toggleZoom()
+      }
       if (!playingRef.current) return
       if (c === 'KeyW' || c === 'ArrowUp' || k === 'w') input.forward = true
       else if (c === 'KeyS' || c === 'ArrowDown' || k === 's') input.back = true
@@ -631,8 +670,8 @@ export default function MinecraftGame() {
       if (x > w - 240 && y > h - 200) return true
       // Top-left HUD: 220px wide, 100px tall.
       if (x < 220 && y < 100) return true
-      // Top-right buttons: 200px wide, 60px tall.
-      if (x > w - 200 && y < 60) return true
+      // Top-right buttons + minimap: 190px wide, 240px tall.
+      if (x > w - 190 && y < 240) return true
       // Bottom hotbar: center, 80px tall.
       if (y > h - 80) return true
       return false
@@ -866,6 +905,9 @@ export default function MinecraftGame() {
     if (!g) return
     const sx = Math.floor(WORLD_SIZE_X / 2) + 0.5
     const sz = Math.floor(WORLD_SIZE_Z / 2) + 0.5
+    // Endless world: the spawn chunks may have streamed out while exploring —
+    // synchronously regenerate + remesh the 3×3 area so respawn isn't a void.
+    g.world.ensureAreaReady(g.scene, Math.floor(sx), Math.floor(sz))
     // Get highest solid block, but ensure spawn is above water level
     // so player doesn't respawn underwater.
     const groundY = g.world.highestBlockY(Math.floor(sx), Math.floor(sz)) + 1
@@ -950,12 +992,13 @@ export default function MinecraftGame() {
           <div>Time: {hh}:{mm} {isNight ? '🌙' : '☀️'}</div>
           <div>Mode: {gameMode}{flying ? ' ✈' : ''}</div>
           <div>Mobs: {mobCount}</div>
+          <div>Chunks: <span className="text-sky-300">{chunkCount}</span> <span className="text-white/40">({settings.unlimitedMap ? 'unlimited' : 'fixed'})</span></div>
         </div>
       )}
 
-      {/* Top-right: menu + settings buttons */}
-      {hudReady && started && (
-        <div className="absolute top-3 right-3 flex flex-col items-end gap-2">
+      {/* Top-right: menu + settings buttons, minimap, controls */}
+      <div className="absolute top-3 right-3 flex flex-col items-end gap-2 pointer-events-none">
+        {hudReady && started && (
           <div className="flex gap-2">
             <button
               onClick={() => setShowSettings(true)}
@@ -972,20 +1015,28 @@ export default function MinecraftGame() {
               ☰ Menu
             </button>
           </div>
-          {active && !isMobile && (
-            <div className="pointer-events-none font-mono text-[11px] text-white/80 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)] text-right space-y-0.5">
-              <div>WASD — move · Ctrl — sprint</div>
-              <div>Space — jump · Shift — crouch</div>
-              <div>Double-Space — fly (creative)</div>
-              <div>F — toggle creative</div>
-              <div>L-click — break/attack · R-click — place</div>
-              <div>1-9 / wheel — select block</div>
-              <div>Esc — pause</div>
-              <div>E — inventory</div>
-            </div>
-          )}
-        </div>
-      )}
+        )}
+        {/* Minimap — click to cycle zoom */}
+        <canvas
+          ref={minimapCanvasRef}
+          onClick={() => gameRef.current?.minimap?.toggleZoom()}
+          className={`w-32 h-32 sm:w-40 sm:h-40 rounded-lg ring-2 ring-white/25 shadow-lg shadow-black/40 bg-[#10141f] cursor-pointer ${hudReady && started ? 'pointer-events-auto' : 'invisible'}`}
+          aria-label="Minimap — click to zoom"
+          data-testid="minimap"
+        />
+        {hudReady && started && active && !isMobile && (
+          <div className="font-mono text-[11px] text-white/80 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)] text-right space-y-0.5">
+            <div>WASD — move · Ctrl — sprint</div>
+            <div>Space — jump · Shift — crouch</div>
+            <div>Double-Space — fly (creative)</div>
+            <div>F — toggle creative</div>
+            <div>L-click — break/attack · R-click — place</div>
+            <div>1-9 / wheel — select block</div>
+            <div>Esc — pause · E — inventory</div>
+            <div>M — minimap zoom</div>
+          </div>
+        )}
+      </div>
 
       {/* Bottom-left: health/hunger/oxygen bars (survival only) */}
       {hudReady && active && gameMode === 'survival' && (
@@ -1391,6 +1442,18 @@ export default function MinecraftGame() {
               </div>
               <div>
                 <label className="text-white/80 text-sm font-mono flex justify-between">
+                  <span>Render Distance</span>
+                  <span className="text-emerald-300">{settings.renderDistance} blocks</span>
+                </label>
+                <input
+                  type="range" min={48} max={176} step={16} value={settings.renderDistance}
+                  onChange={(e) => saveSettings({ ...settings, renderDistance: parseInt(e.target.value, 10) })}
+                  className="w-full accent-emerald-500"
+                />
+                <p className="text-white/40 text-[11px] font-mono mt-1">World streams endlessly — this sets how far terrain and fog reach.</p>
+              </div>
+              <div>
+                <label className="text-white/80 text-sm font-mono flex justify-between">
                   <span>Volume</span>
                   <span className="text-emerald-300">{Math.round(settings.volume * 100)}%</span>
                 </label>
@@ -1431,6 +1494,20 @@ export default function MinecraftGame() {
                   }`}
                 >
                   {settings.bloom ? 'ON' : 'OFF'}
+                </button>
+              </div>
+              <div className="flex items-center justify-between pt-1 border-t border-white/10">
+                <div>
+                  <label className="text-white/80 text-sm font-mono block">Unlimited Map</label>
+                  <span className="text-white/40 text-[11px] font-mono block">Endless chunk streaming (turn OFF for best FPS)</span>
+                </div>
+                <button
+                  onClick={() => saveSettings({ ...settings, unlimitedMap: !settings.unlimitedMap })}
+                  className={`px-4 py-1.5 rounded-md text-sm font-mono transition-colors ${
+                    settings.unlimitedMap ? 'bg-emerald-500 text-black font-semibold' : 'bg-white/10 text-white'
+                  }`}
+                >
+                  {settings.unlimitedMap ? 'ON' : 'OFF'}
                 </button>
               </div>
             </div>

@@ -2,13 +2,13 @@ import { test, expect } from '@playwright/test'
 
 test.describe('VoxelCraft Game', () => {
   test('page loads with canvas element', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
-    const canvas = page.locator('canvas')
+    await page.goto('/voxel-craft', { waitUntil: 'domcontentloaded' })
+    const canvas = page.locator('canvas[data-engine]')
     await expect(canvas).toBeVisible({ timeout: 10000 })
   })
 
   test('shows start screen with game title', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
+    await page.goto('/voxel-craft', { waitUntil: 'domcontentloaded' })
     await page.waitForLoadState('networkidle')
 
     // Check for title
@@ -20,7 +20,7 @@ test.describe('VoxelCraft Game', () => {
   })
 
   test('starts game when New Survival Game button is clicked', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
+    await page.goto('/voxel-craft', { waitUntil: 'domcontentloaded' })
     const playButton = page.locator('button:has-text("New Survival Game")')
     await playButton.click()
 
@@ -33,7 +33,7 @@ test.describe('VoxelCraft Game', () => {
   })
 
   test('shows game menu when paused', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
+    await page.goto('/voxel-craft', { waitUntil: 'domcontentloaded' })
     const playButton = page.locator('button:has-text("New Survival Game")')
     await playButton.click()
     await page.waitForTimeout(2000)
@@ -48,7 +48,7 @@ test.describe('VoxelCraft Game', () => {
   })
 
   test('can open inventory with E key', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
+    await page.goto('/voxel-craft', { waitUntil: 'domcontentloaded' })
     const playButton = page.locator('button:has-text("New Survival Game")')
     await playButton.click()
     await page.waitForTimeout(2000)
@@ -69,7 +69,7 @@ test.describe('VoxelCraft Game', () => {
   })
 
   test('hotbar slots are visible', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
+    await page.goto('/voxel-craft', { waitUntil: 'domcontentloaded' })
     const playButton = page.locator('button:has-text("New Survival Game")')
     await playButton.click()
     await page.waitForTimeout(2000)
@@ -83,7 +83,7 @@ test.describe('VoxelCraft Game', () => {
   })
 
   test('displays HUD elements', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
+    await page.goto('/voxel-craft', { waitUntil: 'domcontentloaded' })
     const playButton = page.locator('button:has-text("New Survival Game")')
     await playButton.click()
     await page.waitForTimeout(2000)
@@ -101,10 +101,10 @@ test.describe('VoxelCraft Game', () => {
     // Emulate mobile device
     await page.setViewportSize({ width: 375, height: 667 })
     await page.emulateMedia({ media: 'screen' })
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
+    await page.goto('/voxel-craft', { waitUntil: 'domcontentloaded' })
 
     // On mobile, the page should still load without errors
-    const canvas = page.locator('canvas')
+    const canvas = page.locator('canvas[data-engine]')
     await expect(canvas).toBeVisible()
 
     // Game title should be visible
@@ -112,7 +112,7 @@ test.describe('VoxelCraft Game', () => {
   })
 
   test('can pause and resume game', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
+    await page.goto('/voxel-craft', { waitUntil: 'domcontentloaded' })
     const playButton = page.locator('button:has-text("New Survival Game")')
     await playButton.click()
     await page.waitForTimeout(2000)
@@ -137,7 +137,7 @@ test.describe('VoxelCraft Game', () => {
   })
 
   test('can restart game from menu', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
+    await page.goto('/voxel-craft', { waitUntil: 'domcontentloaded' })
     const playButton = page.locator('button:has-text("New Survival Game")')
     await playButton.click()
     await page.waitForTimeout(2000)
@@ -156,7 +156,7 @@ test.describe('VoxelCraft Game', () => {
   })
 
   test('creative mode button works', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
+    await page.goto('/voxel-craft', { waitUntil: 'domcontentloaded' })
     const playButton = page.locator('button:has-text("New Creative Game")')
     await playButton.click()
 
@@ -169,5 +169,26 @@ test.describe('VoxelCraft Game', () => {
 
     // Check for creative mode indicator in HUD
     await expect(page.locator('text=Mode: creative')).toBeVisible()
+  })
+
+  test('settings modal opens and toggles unlimited map option', async ({ page }) => {
+    await page.goto('/voxel-craft', { waitUntil: 'domcontentloaded' })
+    const playButton = page.locator('button:has-text("New Creative Game")')
+    await playButton.click()
+    await page.waitForTimeout(2000)
+
+    // Open Settings
+    const settingsButton = page.locator('button:has-text("⚙ Settings")')
+    await settingsButton.click()
+    await page.waitForTimeout(300)
+
+    // Settings modal is visible
+    await expect(page.locator('h2:has-text("Settings")')).toBeVisible()
+    await expect(page.locator('text=Unlimited Map')).toBeVisible()
+
+    // Close Settings modal
+    await page.locator('button:has-text("Close")').click()
+    await page.waitForTimeout(300)
+    await expect(page.locator('h2:has-text("Settings")')).not.toBeVisible()
   })
 })
