@@ -273,6 +273,8 @@ export default function MinecraftGame() {
     const eyePos = new THREE.Vector3()
     const lookDir = new THREE.Vector3()
     const rayOrigin = new THREE.Vector3()
+    const cameraQuaternion = new THREE.Quaternion()
+    const cameraEuler = new THREE.Euler(0, 0, 0, 'YXZ')
     let lastTime = performance.now()
     let frameCount = 0
     let fpsAccum = 0
@@ -334,9 +336,9 @@ export default function MinecraftGame() {
       // Sync camera.
       player.getEyePosition(eyePos)
       camera.position.copy(eyePos)
-      const q = new THREE.Quaternion()
-      q.setFromEuler(new THREE.Euler(player.pitch, player.yaw, 0, 'YXZ'))
-      camera.quaternion.copy(q)
+      cameraEuler.set(player.pitch, player.yaw, 0, 'YXZ')
+      cameraQuaternion.setFromEuler(cameraEuler)
+      camera.quaternion.copy(cameraQuaternion)
 
       // Selection box.
       player.getLookDirection(lookDir)
