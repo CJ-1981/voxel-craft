@@ -50,7 +50,8 @@ export function InventoryUI({ inventory, onClose, onChange }: Props) {
     <button
       key={index}
       onClick={() => handleClick(index)}
-      className="relative w-11 h-11 rounded-sm border-2 border-zinc-600 bg-zinc-800/80 hover:border-zinc-400 flex items-center justify-center"
+      aria-label={slot ? `${ITEMS[slot.item].name}, ${slot.count} item${slot.count > 1 ? 's' : ''}` : `Empty slot ${index + 1}`}
+      className="relative w-11 h-11 rounded-sm border-2 border-zinc-600 bg-zinc-800/80 hover:border-zinc-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 flex items-center justify-center"
     >
       {slot && (
         <>
@@ -73,10 +74,22 @@ export function InventoryUI({ inventory, onClose, onChange }: Props) {
 
   return (
     <div className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm z-40" onClick={onClose}>
-      <div className="bg-zinc-900/95 rounded-xl ring-1 ring-white/15 shadow-2xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="inventory-title"
+        className="bg-zinc-900/95 rounded-xl ring-1 ring-white/15 shadow-2xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+        onClick={e => e.stopPropagation()}
+      >
         <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-bold text-white font-mono">Inventory</h2>
-          <button onClick={onClose} className="text-white/60 hover:text-white text-xl">×</button>
+          <h2 id="inventory-title" className="text-xl font-bold text-white font-mono">Inventory</h2>
+          <button
+            onClick={onClose}
+            aria-label="Close inventory"
+            className="text-white/60 hover:text-white text-xl p-1 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+          >
+            ×
+          </button>
         </div>
 
         {/* Creative item picker — click to get a stack */}
@@ -89,8 +102,9 @@ export function InventoryUI({ inventory, onClose, onChange }: Props) {
                 <button
                   key={itemId}
                   onClick={() => { inventory.addItem(itemId, 64); refresh() }}
-                  className="relative w-10 h-10 rounded-sm border border-zinc-600 bg-zinc-800/80 hover:border-emerald-400 transition-colors flex items-center justify-center"
+                  aria-label={`Add stack of ${def.name}`}
                   title={def.name}
+                  className="relative w-10 h-10 rounded-sm border border-zinc-600 bg-zinc-800/80 hover:border-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 transition-colors flex items-center justify-center"
                 >
                   <img
                     src={tileDataUrl(def.iconTile)}
