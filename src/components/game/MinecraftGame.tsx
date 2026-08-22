@@ -89,7 +89,12 @@ export default function MinecraftGame() {
   // Footstep audio accumulator.
   const stepDistRef = useRef(0)
   // Persistent inventory — survives world restarts.
-  const inventoryRef = useRef<Inventory>(new Inventory())
+  const [inventory] = useState<Inventory>(() => new Inventory())
+  const inventoryRef = useRef<Inventory>(inventory)
+
+  useEffect(() => {
+    inventoryRef.current = inventory
+  }, [inventory])
 
   const [started, setStarted] = useState(false)
   const [paused, setPaused] = useState(false)
@@ -118,10 +123,19 @@ export default function MinecraftGame() {
   const [dead, setDead] = useState(false)
 
   const [selectedMap, setSelectedMap] = useState<MapType>('seoul')
-  const selectedMapRef = useRef<MapType>('seoul')
+  const selectedMapRef = useRef<MapType>(selectedMap)
   const [openChest, setOpenChest] = useState<{ pos: { x: number; y: number; z: number }; slots: Slot[] } | null>(null)
 
-  // Load settings and map selection from localStorage on mount.
+  // Keep refs in sync with state.
+  useEffect(() => {
+    settingsRef.current = settings
+  }, [settings])
+
+  useEffect(() => {
+    selectedMapRef.current = selectedMap
+  }, [selectedMap])
+
+  // Load settings, map selection, and mobile state on mount after hydration.
   useEffect(() => {
     try {
       const raw = localStorage.getItem('voxelcraft_settings')
@@ -137,6 +151,7 @@ export default function MinecraftGame() {
       }
     } catch { /* ignore */ }
     setHasSave(World.hasSave())
+    setIsMobile(isTouchDevice() || !supportsPointerLock())
   }, [])
 
   // Persist settings.
@@ -737,10 +752,6 @@ export default function MinecraftGame() {
     }
   }, [worldSeed, gameMode])
 
-  useEffect(() => {
-    setIsMobile(isTouchDevice() || !supportsPointerLock())
-  }, [])
-
   // ----- Mobile action handlers -----
   const mobileBreak = useCallback(() => {
     const g = gameRef.current
@@ -1073,7 +1084,7 @@ export default function MinecraftGame() {
       {hudReady && (
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-1 p-1.5 bg-black/40 backdrop-blur-sm rounded-md ring-1 ring-white/10 max-w-[95vw] overflow-x-auto" key={invVersion}>
           {Array.from({ length: HOTBAR_SIZE }).map((_, i) => {
-            const slot = inventoryRef.current.slots[MAIN_SIZE + i]
+            const slot = inventory.slots[MAIN_SIZE + i]
             return (
               <button
                 key={i}
@@ -1384,7 +1395,7 @@ export default function MinecraftGame() {
       {/* Inventory UI */}
       {showInventory && hudReady && (
         <InventoryUI
-          inventory={inventoryRef.current}
+          inventory={inventory}
           onClose={() => {
             setShowInventory(false)
             showInventoryRef.current = false
@@ -1402,7 +1413,7 @@ export default function MinecraftGame() {
         <ChestUI
           chestPos={openChest.pos}
           chestSlots={openChest.slots}
-          playerInventory={inventoryRef.current}
+          playerInventory={inventory}
           onClose={() => {
             setOpenChest(null)
             playingRef.current = true
