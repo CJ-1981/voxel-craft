@@ -95,12 +95,17 @@ function Carousel({
 
   React.useEffect(() => {
     if (!api) return
-    onSelect(api)
-    api.on("reInit", onSelect)
-    api.on("select", onSelect)
+    let isMounted = true
+    const handleSelect = (a: CarouselApi) => {
+      if (isMounted) onSelect(a)
+    }
+    api.on("reInit", handleSelect)
+    api.on("select", handleSelect)
+    handleSelect(api)
 
     return () => {
-      api?.off("select", onSelect)
+      isMounted = false
+      api?.off("select", handleSelect)
     }
   }, [api, onSelect])
 

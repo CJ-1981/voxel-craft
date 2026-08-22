@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { Inventory, Slot, MAIN_SIZE, HOTBAR_SIZE } from '@/lib/game/inventory'
 import { ITEMS, ItemType } from '@/lib/game/items'
 import { tileDataUrl } from '@/lib/game/textures'
@@ -13,31 +13,33 @@ interface Props {
   onChange: () => void
 }
 
-export function ChestUI({ chestPos, chestSlots, playerInventory, onClose, onChange }: Props) {
+export function ChestUI(props: Props) {
+  const { chestPos, chestSlots, playerInventory, onClose, onChange } = props
   const [, forceUpdate] = useState(0)
   const [dragging, setDragging] = useState<Slot>(null)
   const refresh = useCallback(() => { forceUpdate(n => n + 1); onChange() }, [onChange])
 
   // Handle clicking a chest slot (0..26)
   const handleChestClick = (index: number) => {
-    const slot = chestSlots[index]
+    const slots = props.chestSlots
+    const slot = slots[index]
     if (!dragging) {
       if (slot) {
-        chestSlots[index] = null
+        slots[index] = null
         setDragging(slot)
       }
     } else {
       if (!slot) {
-        chestSlots[index] = dragging
+        slots[index] = dragging
         setDragging(null)
       } else if (slot.item === dragging.item) {
         const add = Math.min(64 - slot.count, dragging.count)
-        slot.count += add
+        slots[index] = { ...slot, count: slot.count + add }
         const remain = dragging.count - add
         if (remain <= 0) setDragging(null)
         else setDragging({ ...dragging, count: remain })
       } else {
-        chestSlots[index] = dragging
+        slots[index] = dragging
         setDragging(slot)
       }
     }
